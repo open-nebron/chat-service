@@ -1,46 +1,50 @@
-# Multi-stage Dockerfile for Zenuxs chat-service
-
-# Stage 1: Build TypeScript source
-FROM node:20-alpine AS builder
+# Stage 1 — build:
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
-# Copy dependency manifests
-COPY package*.json tsconfig.json ./
+# Copy shared contracts first for local file dependency
+COPY shared-contracts /shared-contracts
+
+# Copy chat-service package manifests
+COPY chat-service/package*.json ./
 
 # Install all dependencies
-RUN npm install
+RUN npm ci
 
-# Copy source code
-COPY src/ ./src/
+# Copy tsconfig and sources
+COPY chat-service/tsconfig.json ./
+COPY chat-service/src ./src
 
 # Compile TypeScript
 RUN npm run build
 
-# Stage for dev mode target
-FROM builder AS build
+# Stage 2 — runtime:
+FROM node:20-alpine
 
-# Stage 2: Production runner
-FROM node:20-alpine AS runner
+# Non-root user (uid 1001)
+RUN addgroup -g 1001 -S zenuxs && \
+    adduser -u 1001 -S zenuxs -G zenuxs
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=4003
 
-# Copy package manifests and install only production dependencies
-COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
+# Copy production files and shared-contracts
+COPY --chown=zenuxs:zenuxs chat-service/package*.json ./
+COPY --chown=zenuxs:zenuxs --from=build /shared-contracts /shared-contracts
+COPY --chown=zenuxs:zenuxs --from=build /app/node_modules ./node_modules
+RUN npm prune --omit=dev
 
-# Copy compiled files from builder
-COPY --from=builder /app/dist ./dist
+# Copy compiled artifacts
+COPY --chown=zenuxs:zenuxs --from=build /app/dist ./dist
 
-# Use non-root node user
-USER node
+USER zenuxs
 
 EXPOSE 4003
 
-HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:4003/health || exit 1
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://localhost:4003/health || exit 1
 
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/server.js"]
