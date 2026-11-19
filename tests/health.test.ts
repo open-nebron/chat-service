@@ -11,12 +11,13 @@ describe('Health endpoint (GET /health)', () => {
     NODE_ENV: 'test',
     LOG_LEVEL: 'silent',
     SCYLLA_HOSTS: 'localhost:9042',
-    SCYLLA_KEYSPACE: 'zenuxs',
+    SCYLLA_KEYSPACE: 'nebron',
     SCYLLA_DATACENTER: 'datacenter1',
     REDIS_URL: 'redis://localhost:6379',
     AUTH_JWKS_URL: 'http://localhost:4001/.well-known/jwks.json',
-    JWT_ISSUER: 'zenuxs-auth',
+    JWT_ISSUER: 'nebron-auth',
     JWT_AUDIENCE: 'chat',
+    EVENTS_STREAM: 'nebron.events',
   };
 
   let mockScylla: cassandra.Client;
@@ -91,7 +92,12 @@ describe('Health endpoint (GET /health)', () => {
   });
 
   it('returns 503 with scylla: "down" when Scylla ping rejects', async () => {
-    (mockScylla.execute as any).mockRejectedValueOnce(new Error('Scylla timeout'));
+    (mockScylla.execute as any).mockImplementation((query: string) => {
+      if (query.includes('system.local')) {
+        return Promise.reject(new Error('Scylla timeout'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
 
     const app = await buildApp({
       config: testConfig,

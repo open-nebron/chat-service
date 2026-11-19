@@ -1,11 +1,17 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import { type Config, loadConfig } from './config.js';
 import { scyllaPlugin, type ScyllaPluginOptions } from './plugins/scylla.js';
 import { redisPlugin, type RedisPluginOptions } from './plugins/redis.js';
 import { jwtPlugin, type JwtPluginOptions } from './plugins/jwt.js';
 import { loggingPlugin } from './plugins/logging.js';
 import { docsPlugin } from './plugins/docs.js';
+import { reposPlugin } from './plugins/repos.js';
+import { runMigrations } from './db/migrate.js';
 import { healthRoutes } from './routes/health.js';
+import { conversationsRoutes } from './routes/conversations.js';
+import { messagesRoutes } from './routes/messages.js';
+import { AppError } from './lib/errors.js';
 
 export interface BuildAppOptions {
   config?: Config;
@@ -57,8 +63,63 @@ export async function buildApp(
   await app.register(redisPlugin, { config: cfg, client: options.redisClient });
   await app.register(jwtPlugin, { config: cfg, keySet: options.jwksKeySet });
 
+  // Run Scylla migrations
+  await runMigrations(app.scylla, cfg.SCYLLA_KEYSPACE, app.log);
+
+  // Register repositories
+  await app.register(reposPlugin);
+
+  // Register rate limiting
+  const isRealRedis = typeof (app.redis as any)?.defineCommand === 'function';
+  await app.register(rateLimit, {
+    global: false,
+    hook: 'preHandler',
+    redis: isRealRedis ? app.redis : undefined,
+    keyGenerator: (req) => req.user?.userId || req.ip,
+  });
+
+  // Global Error Handler for standardized error envelopes
+  app.setErrorHandler((error: any, _request, reply) => {
+    if (error.statusCode === 429) {
+      return reply.status(429).send({
+        error: {
+          code: 'rate_limit_exceeded',
+          message: error.message || 'Rate limit exceeded, retry later',
+        },
+      });
+    }
+
+    if (error instanceof AppError) {
+      return reply.status(error.statusCode).send({
+        error: {
+          code: error.code,
+          message: error.message,
+        },
+      });
+    }
+
+    if (error.validation) {
+      return reply.status(400).send({
+        error: {
+          code: 'invalid_payload',
+          message: error.message,
+        },
+      });
+    }
+
+    const statusCode = error.statusCode || 500;
+    return reply.status(statusCode).send({
+      error: {
+        code: error.code || 'internal_error',
+        message: error.message || 'Internal server error',
+      },
+    });
+  });
+
   // Register routes
   await app.register(healthRoutes);
+  await app.register(conversationsRoutes);
+  await app.register(messagesRoutes);
 
   return app;
 }

@@ -8,7 +8,7 @@ export const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.string().default('info'),
   SCYLLA_HOSTS: z.string().default('scylla:9042'),
-  SCYLLA_KEYSPACE: z.string().default('zenuxs'),
+  SCYLLA_KEYSPACE: z.string().default('nebron'),
   SCYLLA_DATACENTER: z.string().default('datacenter1'),
   REDIS_URL: z
     .string({
@@ -22,8 +22,9 @@ export const configSchema = z.object({
       invalid_type_error: 'AUTH_JWKS_URL must be a string',
     })
     .url('AUTH_JWKS_URL must be a valid URL'),
-  JWT_ISSUER: z.string().default('zenuxs-auth'),
+  JWT_ISSUER: z.string().default('nebron-auth'),
   JWT_AUDIENCE: z.string().default('chat'),
+  EVENTS_STREAM: z.string().default('nebron.events'),
 });
 
 export type Config = z.infer<typeof configSchema>;

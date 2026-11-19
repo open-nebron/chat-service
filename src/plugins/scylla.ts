@@ -44,6 +44,16 @@ const plugin: FastifyPluginAsync<ScyllaPluginOptions> = async (
       fastify.log.info(
         `[ScyllaDB] Connecting to ScyllaDB at ${contactPoints.join(', ')} (attempt ${attempt}/${maxRetries})...`
       );
+      const bootstrapClient = new cassandra.Client({
+        contactPoints,
+        localDataCenter: SCYLLA_DATACENTER,
+      });
+      await bootstrapClient.connect();
+      await bootstrapClient.execute(
+        `CREATE KEYSPACE IF NOT EXISTS "${SCYLLA_KEYSPACE}" WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}`
+      );
+      await bootstrapClient.shutdown();
+
       await client.connect();
       fastify.log.info('[ScyllaDB] Successfully connected to ScyllaDB');
       connected = true;

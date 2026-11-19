@@ -11,6 +11,27 @@ jobs:
     name: Build, Lint and Test
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      scylla:
+        image: scylladb/scylla:5.4
+        ports:
+          - 9042:9042
+        options: >-
+          --smp 1
+          --memory 1G
+          --overprovisioned 1
+          --developer-mode 1
+
     steps:
       - name: Checkout chat-service
         uses: actions/checkout@v4
@@ -42,6 +63,27 @@ jobs:
         working-directory: chat-service
         run: npm run build
 
+      - name: Wait for ScyllaDB
+        working-directory: chat-service
+        run: |
+          node -e "
+            import('cassandra-driver').then(async ({ default: cassandra }) => {
+              const client = new cassandra.Client({ contactPoints: ['127.0.0.1:9042'], localDataCenter: 'datacenter1' });
+              for (let i = 0; i < 45; i++) {
+                try {
+                  await client.connect();
+                  console.log('ScyllaDB is ready!');
+                  await client.shutdown();
+                  return process.exit(0);
+                } catch (e) {
+                  console.log('Waiting for ScyllaDB... attempt', i + 1);
+                  await new Promise(r => setTimeout(r, 2000));
+                }
+              }
+              process.exit(1);
+            });
+          "
+
       - name: Run test suite
         working-directory: chat-service
         run: npm test
@@ -67,4 +109,4 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        run: docker build -f chat-service/Dockerfile -t zenuxs-chat-service:ci .
+        run: docker build -f chat-service/Dockerfile -t nebron-chat-service:ci .

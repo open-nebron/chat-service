@@ -23,24 +23,25 @@ RUN npm run build
 FROM node:20-alpine
 
 # Non-root user (uid 1001)
-RUN addgroup -g 1001 -S zenuxs && \
-    adduser -u 1001 -S zenuxs -G zenuxs
+RUN addgroup -g 1001 -S nebron && \
+    adduser -u 1001 -S nebron -G nebron
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=4003
 
-# Copy production files and shared-contracts
-COPY --chown=zenuxs:zenuxs chat-service/package*.json ./
-COPY --chown=zenuxs:zenuxs --from=build /shared-contracts /shared-contracts
-COPY --chown=zenuxs:zenuxs --from=build /app/node_modules ./node_modules
+# Copy production files, specs, and shared-contracts
+COPY --chown=nebron:nebron chat-service/package*.json ./
+COPY --chown=nebron:nebron chat-service/openapi.yaml ./openapi.yaml
+COPY --chown=nebron:nebron --from=build /shared-contracts /shared-contracts
+COPY --chown=nebron:nebron --from=build /app/node_modules ./node_modules
 RUN npm prune --omit=dev
 
 # Copy compiled artifacts
-COPY --chown=zenuxs:zenuxs --from=build /app/dist ./dist
+COPY --chown=nebron:nebron --from=build /app/dist ./dist
 
-USER zenuxs
+USER nebron
 
 EXPOSE 4003
 

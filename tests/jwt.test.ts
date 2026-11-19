@@ -16,12 +16,13 @@ describe('JWT Verification and authenticate preHandler', () => {
     NODE_ENV: 'test',
     LOG_LEVEL: 'silent',
     SCYLLA_HOSTS: 'localhost:9042',
-    SCYLLA_KEYSPACE: 'zenuxs',
+    SCYLLA_KEYSPACE: 'nebron',
     SCYLLA_DATACENTER: 'datacenter1',
     REDIS_URL: 'redis://localhost:6379',
     AUTH_JWKS_URL: 'http://localhost:4001/.well-known/jwks.json',
-    JWT_ISSUER: 'zenuxs-auth',
+    JWT_ISSUER: 'nebron-auth',
     JWT_AUDIENCE: 'chat',
+    EVENTS_STREAM: 'nebron.events',
   };
 
   const mockScylla = {
@@ -71,10 +72,10 @@ describe('JWT Verification and authenticate preHandler', () => {
 
     const token = await new SignJWT({
       sid: 'session-xyz',
-      email: 'test@zenuxs.com',
+      email: 'test@nebron.com',
     })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key-id' })
-      .setIssuer('zenuxs-auth')
+      .setIssuer('nebron-auth')
       .setAudience(['chat', 'web'])
       .setSubject('user-123')
       .setIssuedAt()
@@ -94,14 +95,14 @@ describe('JWT Verification and authenticate preHandler', () => {
     expect(body.user).toEqual({
       userId: 'user-123',
       sessionId: 'session-xyz',
-      email: 'test@zenuxs.com',
+      email: 'test@nebron.com',
     });
 
     // Also verify verifyAccessTokenForTest helper
     const decoded = await verifyAccessTokenForTest(token, localJwks, testConfig);
     expect(decoded.sub).toBe('user-123');
     expect(decoded.sid).toBe('session-xyz');
-    expect(decoded.email).toBe('test@zenuxs.com');
+    expect(decoded.email).toBe('test@nebron.com');
 
     await app.close();
   });
@@ -111,10 +112,10 @@ describe('JWT Verification and authenticate preHandler', () => {
 
     const token = await new SignJWT({
       sid: 'session-xyz',
-      email: 'test@zenuxs.com',
+      email: 'test@nebron.com',
     })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key-id' })
-      .setIssuer('zenuxs-auth')
+      .setIssuer('nebron-auth')
       .setAudience('core') // Wrong audience!
       .setSubject('user-123')
       .setIssuedAt()
@@ -142,10 +143,10 @@ describe('JWT Verification and authenticate preHandler', () => {
 
     const token = await new SignJWT({
       sid: 'session-xyz',
-      email: 'test@zenuxs.com',
+      email: 'test@nebron.com',
     })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key-id' })
-      .setIssuer('zenuxs-auth')
+      .setIssuer('nebron-auth')
       .setAudience('chat')
       .setSubject('user-123')
       .setIssuedAt(Math.floor(Date.now() / 1000) - 3600)
