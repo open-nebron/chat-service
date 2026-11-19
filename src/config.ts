@@ -25,6 +25,20 @@ export const configSchema = z.object({
   JWT_ISSUER: z.string().default('nebron-auth'),
   JWT_AUDIENCE: z.string().default('chat'),
   EVENTS_STREAM: z.string().default('nebron.events'),
+  EVENTS_GROUP: z.string().default('chat-service'),
+  CORE_URL: z.string().default('http://core:4002'),
+  INTERNAL_TOKEN: z
+    .string({
+      required_error: 'INTERNAL_TOKEN is required',
+      invalid_type_error: 'INTERNAL_TOKEN must be a string',
+    })
+    .min(1, 'INTERNAL_TOKEN is required'),
+  WS_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
+  WS_MAX_CONNECTIONS_PER_USER: z.coerce.number().int().positive().default(5),
+  WS_RATE_LIMIT_MESSAGES_PER_SEC: z.coerce.number().int().positive().default(10),
+  WS_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().positive().default(65536),
+  WS_MAX_FRAME_BYTES: z.coerce.number().int().positive().default(32768),
+  PRESENCE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 });
 
 export type Config = z.infer<typeof configSchema>;

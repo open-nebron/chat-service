@@ -28,6 +28,37 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
 
+  /ws:
+    get:
+      tags:
+        - Real-Time WebSocket
+      summary: Real-Time WebSocket Gateway
+      description: |
+        Upgrades HTTP connection to WebSocket for bidirectional real-time messaging, typing indicators, and presence tracking.
+        Requires query parameter `token=<access_token>` containing a valid RS256 Bearer JWT.
+
+        Close Codes:
+        - 4401: Invalid or expired token
+        - 4403: Session revoked
+        - 4408: Maximum concurrent connections exceeded (max 5)
+        - 4409: Frame too large (limit: 32 KB)
+
+        Refer to `route-docs/ws-protocol.md` and `route-docs/ws-errors.md` for full message frame schemas.
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema:
+            type: string
+          description: RS256 JWT access token
+      responses:
+        '101':
+          description: Switching Protocols to WebSocket
+        '401':
+          description: Missing or invalid token (connection closed with 4401)
+        '403':
+          description: Revoked session (connection closed with 4403)
+
   /conversations:
     post:
       tags:

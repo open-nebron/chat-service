@@ -249,6 +249,214 @@ Response: HTTP 204 No Content
 
 ---
 
+## WebSocket Real-Time Protocol
+
+The service exposes a WebSocket gateway at `GET /ws?token=<access_token>` for bidirectional, sub-millisecond messaging, live typing indicators, and presence tracking.
+
+### 1. Connection & Handshake
+- Connect via `ws://localhost:4003/ws?token=<access_token>`.
+- Authentication is performed during the WebSocket upgrade using RS256 JWT verification (`iss=nebron-auth`, `aud` includes `chat`).
+- If token is invalid/expired: socket closes immediately with code **`4401`** (`invalid_token`).
+- If session is revoked in Redis set `revoked_sessions:{sessionId}`: closes with code **`4403`** (`session_revoked`).
+- Concurrency limit: Maximum 5 concurrent sockets per user. On the 6th connection, the oldest socket is closed with code **`4408`** (`too_many_connections`).
+- Oversized frame protection: Any incoming frame exceeding 32 KB (32,768 bytes) causes immediate termination with code **`4409`** (`frame_too_large`).
+
+Upon successful acceptance and subscription registration, the server sends a `ready` payload:
+```json
+{
+  "type": "ready",
+  "payload": {
+    "sessionId": "sess_12345",
+    "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "limits": {
+      "messagesPerSec": 10,
+      "typingPerSec": 10,
+      "readPerSec": 20,
+      "maxFrameBytes": 32768
+    }
+  }
+}
+```
+
+### 2. Client-to-Server Messages
+
+Every client request can include an optional `id` string (e.g. UUID or client timestamp). The server echoes this in responses as `ackId`.
+
+#### `ping` / `pong`
+Heartbeat check.
+```json
+// Client -> Server
+{ "type": "ping", "payload": { "data": "client-heartbeat" }, "id": "req-1" }
+
+// Server -> Client
+{ "type": "pong", "payload": { "data": "client-heartbeat" }, "ackId": "req-1" }
+```
+
+#### `message.send`
+Send a new message to a conversation. Supports idempotent delivery via `clientId`.
+```json
+// Client -> Server
+{
+  "type": "message.send",
+  "payload": {
+    "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+    "body": "Hello world!",
+    "clientId": "client-msg-uuid-123"
+  },
+  "id": "req-2"
+}
+
+// Server -> Client (Ack)
+{
+  "type": "message.sent",
+  "payload": {
+    "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+    "clientId": "client-msg-uuid-123",
+    "message": {
+      "id": "be15a7f0-e35d-11f1-abbd-a1b88e74a509",
+      "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+      "senderId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "body": "Hello world!",
+      "createdAt": "2026-11-19T22:00:00.000Z",
+      "editedAt": null,
+      "deleted": false
+    },
+    "delivered": true
+  },
+  "ackId": "req-2"
+}
+```
+*Note*: If recipient has blocked the sender, `delivered: false` is returned silently and the message is neither saved to ScyllaDB nor delivered to the recipient.
+
+#### `message.read`
+Mark a conversation up to `messageId` as read.
+```json
+// Client -> Server
+{
+  "type": "message.read",
+  "payload": {
+    "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+    "messageId": "be15a7f0-e35d-11f1-abbd-a1b88e74a509"
+  },
+  "id": "req-3"
+}
+
+// Server -> Client (Ack)
+{
+  "type": "message.read.ack",
+  "payload": {
+    "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+    "messageId": "be15a7f0-e35d-11f1-abbd-a1b88e74a509"
+  },
+  "ackId": "req-3"
+}
+```
+
+#### `typing.start` / `typing.stop`
+Broadcast typing indicator state to conversation members.
+```json
+// Client -> Server
+{
+  "type": "typing.start",
+  "payload": {
+    "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a"
+  }
+}
+```
+Typing automatically expires after **5 seconds** without client input, emitting `typing: false`.
+
+---
+
+### 3. Server-to-Client Push Events
+
+#### `message.new`
+Broadcast to recipient sockets when a new message is received.
+```json
+{
+  "type": "message.new",
+  "payload": {
+    "senderId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "message": {
+      "id": "be15a7f0-e35d-11f1-abbd-a1b88e74a509",
+      "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+      "senderId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "body": "Hello world!",
+      "createdAt": "2026-11-19T22:00:00.000Z",
+      "editedAt": null,
+      "deleted": false
+    }
+  }
+}
+```
+
+#### `typing.update`
+Broadcast when a peer starts or stops typing.
+```json
+{
+  "type": "typing.update",
+  "payload": {
+    "conversationId": "e4f8a61b-90a3-5c24-9b2f-7848df74f07a",
+    "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "typing": true
+  }
+}
+```
+
+#### `presence.update`
+Broadcast to all mutual conversation channels on peer online/offline transitions.
+```json
+{
+  "type": "presence.update",
+  "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "online": false,
+  "lastSeenAt": "2026-11-19T22:05:00.000Z"
+}
+```
+
+---
+
+## Block Enforcement Architecture
+
+Nebron enforces a strict three-layer defense to guarantee blocked users cannot deliver messages or detect presence:
+
+1. **In-Memory Socket Cache**: On connection, peer IDs from active conversations are checked against `core-backend` (`GET /relationships/check?userIds=...`) and cached in `socket.blockedPeers`.
+2. **Redis Streams Reactive Updates**: The `RedisStreamEventConsumer` listens to `nebron.events`:
+   - `core.relationship.blocked`: Dynamically updates `blockedPeers` in all connected sockets for both users and updates Redis `rel:{userA}:{userB}` cache.
+   - `core.relationship.unblocked`: Removes blocks in connected sockets and clears the Redis cache.
+3. **Lazy Core Invalidation**: On cache miss during `message.send`, a single-user check is dispatched to `core-backend` and cached for 300 seconds.
+
+**Blocked Semantics**:
+- Sending to a blocking user drops the message silently without DB persistence.
+- Over WebSocket: Sender receives `{ type: "message.sent", payload: { delivered: false } }`.
+- Over HTTP: Sender receives `HTTP 204 No Content`.
+- Recipient receives zero notification, zero frames, and zero presence updates from blocked users.
+
+---
+
+## Presence Architecture
+
+Presence state is tracked in Redis hash `presence:{userId}`:
+- On Connect: `HINCRBY presence:{userId} sockets 1`, `HDEL presence:{userId} lastSeenAt`, `EXPIRE 3600`.
+- On Disconnect: `HINCRBY presence:{userId} sockets -1`. If remaining `<= 0`, records `lastSeenAt` timestamp, clears active hash, and broadcasts `online: false`.
+- Heartbeat / Refresh: Every 5 minutes, connected sockets refresh key TTL to 3600 seconds.
+
+---
+
+## Multi-Instance Scaling
+
+The chat service is designed for horizontal stateless scaling:
+- **Redis Pub/Sub Fanout**:
+  - `ws:conv:{conversationId}`: Real-time message delivery, typing events, and presence updates across arbitrary pods.
+  - `ws:user:{userId}`: Direct personal events (session revocations, profile updates).
+  - `ws:signal:{userId}`: Voice and video call signaling placeholder.
+- **Docker Compose Scale**:
+  Run multiple chat service pods concurrently:
+  ```bash
+  docker compose up --scale chat=2 -d
+  ```
+
+---
+
 ## Testing & Isolated Keyspaces
 
 Tests run with Vitest against real ScyllaDB and Redis containers. To ensure test isolation and allow concurrent test execution without cross-test data pollution:

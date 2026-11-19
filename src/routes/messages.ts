@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { isValidUuid } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
+import { isPeerBlocked } from '../lib/block-check.js';
 
 const getMessagesParamsSchema = z
   .object({
@@ -155,14 +156,29 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         throw new AppError('message_too_long', 'Message cannot exceed 4000 characters', 400);
       }
 
+      const recipientId =
+        conv.memberIds.find((m) => m !== currentUserId) || currentUserId;
+
+      // Check block state: if recipient has blocked sender, return 204 No Content silently
+      if (recipientId !== currentUserId && fastify.config?.INTERNAL_TOKEN) {
+        const isBlocked = await isPeerBlocked(
+          fastify.redis,
+          fastify.config.CORE_URL,
+          fastify.config.INTERNAL_TOKEN,
+          currentUserId,
+          recipientId,
+          request.log
+        );
+        if (isBlocked) {
+          return reply.status(204).send();
+        }
+      }
+
       const message = await fastify.repos.messages.insert({
         conversationId: id,
         senderId: currentUserId,
         body: sanitized,
       });
-
-      const recipientId =
-        conv.memberIds.find((m) => m !== currentUserId) || currentUserId;
 
       // Update user_conversations for sender (unread unchanged)
       await fastify.repos.userConversations.upsert({
@@ -186,16 +202,33 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         unreadDelta: 1,
       });
 
+      const formatted = {
+        id: message.id,
+        conversationId: message.conversationId,
+        senderId: message.senderId,
+        body: message.body,
+        createdAt: message.createdAt.toISOString(),
+        editedAt: message.editedAt ? message.editedAt.toISOString() : null,
+        deleted: message.deleted,
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({
+            type: 'message.new',
+            payload: {
+              message: formatted,
+              senderId: currentUserId,
+            },
+          })
+        );
+      } catch (err: any) {
+        request.log.warn({ err: err.message }, 'Failed publishing new message to Redis');
+      }
+
       return reply.status(201).send({
-        data: {
-          id: message.id,
-          conversationId: message.conversationId,
-          senderId: message.senderId,
-          body: message.body,
-          createdAt: message.createdAt.toISOString(),
-          editedAt: message.editedAt ? message.editedAt.toISOString() : null,
-          deleted: message.deleted,
-        },
+        data: formatted,
       });
     }
   );

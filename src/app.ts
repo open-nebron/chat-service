@@ -1,5 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import fastifyWebsocket from '@fastify/websocket';
+import crypto from 'node:crypto';
 import { type Config, loadConfig } from './config.js';
 import { scyllaPlugin, type ScyllaPluginOptions } from './plugins/scylla.js';
 import { redisPlugin, type RedisPluginOptions } from './plugins/redis.js';
@@ -7,11 +9,20 @@ import { jwtPlugin, type JwtPluginOptions } from './plugins/jwt.js';
 import { loggingPlugin } from './plugins/logging.js';
 import { docsPlugin } from './plugins/docs.js';
 import { reposPlugin } from './plugins/repos.js';
+import { wsPlugin } from './ws/server.js';
+import { RedisStreamEventConsumer } from './modules/events/consumer.js';
 import { runMigrations } from './db/migrate.js';
 import { healthRoutes } from './routes/health.js';
 import { conversationsRoutes } from './routes/conversations.js';
 import { messagesRoutes } from './routes/messages.js';
 import { AppError } from './lib/errors.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    config: Config;
+    eventConsumer?: RedisStreamEventConsumer;
+  }
+}
 
 export interface BuildAppOptions {
   config?: Config;
@@ -56,9 +67,17 @@ export async function buildApp(
           },
   });
 
+  // Decorate config
+  app.decorate('config', cfg);
+
   // Register foundational plugins
   await app.register(loggingPlugin);
   await app.register(docsPlugin);
+  await app.register(fastifyWebsocket, {
+    options: {
+      maxPayload: 1048576,
+    },
+  });
   await app.register(scyllaPlugin, { config: cfg, client: options.scyllaClient });
   await app.register(redisPlugin, { config: cfg, client: options.redisClient });
   await app.register(jwtPlugin, { config: cfg, keySet: options.jwksKeySet });
@@ -68,6 +87,9 @@ export async function buildApp(
 
   // Register repositories
   await app.register(reposPlugin);
+
+  // Register websocket plugin
+  await app.register(wsPlugin);
 
   // Register rate limiting
   const isRealRedis = typeof (app.redis as any)?.defineCommand === 'function';
@@ -120,6 +142,23 @@ export async function buildApp(
   await app.register(healthRoutes);
   await app.register(conversationsRoutes);
   await app.register(messagesRoutes);
+
+  // Start Redis stream event consumer for nebron.events
+  if (isRealRedis && cfg.REDIS_URL) {
+    const groupSuffix = cfg.NODE_ENV === 'test' ? `-${crypto.randomUUID().slice(0, 8)}` : '';
+    const eventConsumer = new RedisStreamEventConsumer({
+      redisUrl: cfg.REDIS_URL,
+      streamName: cfg.EVENTS_STREAM,
+      groupName: `${cfg.EVENTS_GROUP}${groupSuffix}`,
+      subscriptionManager: app.subscriptionManager,
+      logger: app.log,
+    });
+    app.decorate('eventConsumer', eventConsumer);
+    await eventConsumer.start();
+    app.addHook('onClose', async () => {
+      await eventConsumer.stop();
+    });
+  }
 
   return app;
 }

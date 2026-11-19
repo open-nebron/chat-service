@@ -33,16 +33,19 @@ export async function createTestToken(
   options?: {
     email?: string;
     sessionId?: string;
+    sid?: string;
     issuer?: string;
     audience?: string | string[];
     expiresIn?: string;
   }
 ): Promise<string> {
   const { privateKey } = await initTestAuth();
+  const sessionVal = options?.sessionId || options?.sid || 'test-session';
 
   return new SignJWT({
     sub: userId,
-    sessionId: options?.sessionId || 'test-session',
+    sessionId: sessionVal,
+    sid: sessionVal,
     email: options?.email || `${userId}@nebron.com`,
   })
     .setProtectedHeader({ alg: 'RS256', kid: 'test-key-id' })
@@ -95,7 +98,10 @@ export async function setupTestKeyspace(
   };
 }
 
-export async function createRealTestApp(keyspaceContext: TestKeyspaceContext) {
+export async function createRealTestApp(
+  keyspaceContext: TestKeyspaceContext,
+  configOverrides?: Partial<Config>
+) {
   const { jwks } = await initTestAuth();
 
   const redis = new Redis('redis://127.0.0.1:6379', {
@@ -116,6 +122,16 @@ export async function createRealTestApp(keyspaceContext: TestKeyspaceContext) {
     JWT_ISSUER: 'nebron-auth',
     JWT_AUDIENCE: 'chat',
     EVENTS_STREAM: 'nebron.events',
+    EVENTS_GROUP: 'test-chat-service',
+    CORE_URL: 'http://127.0.0.1:4002',
+    INTERNAL_TOKEN: 'test-internal-token',
+    WS_HEARTBEAT_INTERVAL_SECONDS: 30,
+    WS_MAX_CONNECTIONS_PER_USER: 5,
+    WS_RATE_LIMIT_MESSAGES_PER_SEC: 10,
+    WS_RATE_LIMIT_BYTES_PER_SEC: 65536,
+    WS_MAX_FRAME_BYTES: 32768,
+    PRESENCE_TTL_SECONDS: 3600,
+    ...configOverrides,
   };
 
   const app = await buildApp({
