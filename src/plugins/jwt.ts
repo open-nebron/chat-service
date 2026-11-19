@@ -82,7 +82,7 @@ const plugin: FastifyPluginAsync<JwtPluginOptions> = async (
 
   const verifyJwt = async (token: string): Promise<DecodedToken> => {
     const acceptedIssuers = Array.from(
-      new Set([cfg.JWT_ISSUER, 'nebron-auth', 'zenuxs-auth'])
+      new Set([cfg.JWT_ISSUER, 'nebron-auth'])
     );
     const { payload } = await jwtVerify(token, keySet, {
       issuer: acceptedIssuers,
@@ -167,7 +167,7 @@ export async function verifyAccessTokenForTest(
     createRemoteJWKSet(new URL(cfg.AUTH_JWKS_URL));
 
   const acceptedIssuers = Array.from(
-    new Set([cfg.JWT_ISSUER, 'nebron-auth', 'zenuxs-auth'])
+    new Set([cfg.JWT_ISSUER, 'nebron-auth'])
   );
   const { payload } = await jwtVerify(token, keySet, {
     issuer: acceptedIssuers,
