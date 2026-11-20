@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { ExtendedWebSocket } from '../subscriptions.js';
-import { isPeerBlocked } from '../../lib/block-check.js';
+import { isPeerBlocked, filterGroupRecipients } from '../../lib/block-check.js';
 import { isValidUuid } from '../../lib/conversation-id.js';
 
 export interface MessageSendIn {
@@ -105,28 +105,22 @@ export async function handleMessageSend(
     return;
   }
 
-  // Determine peer
-  const peerId = conv.memberIds.find((m) => m !== socket.userId) || socket.userId;
+  // Determine recipients and check block state
+  let permittedRecipients: string[] = [];
 
-  // Check block state
-  if (peerId !== socket.userId) {
-    let peerBlockState = socket.blockedPeers.get(peerId);
-    if (!peerBlockState) {
-      // Lazy invalidation on cache miss
-      const isBlocked = await isPeerBlocked(
-        fastify.redis,
-        fastify.config.CORE_URL,
-        fastify.config.INTERNAL_TOKEN,
-        socket.userId,
-        peerId,
-        fastify.log
-      );
-      peerBlockState = { blocked: isBlocked };
-      socket.blockedPeers.set(peerId, peerBlockState);
-    }
+  if (conv.kind === 'group') {
+    const filterRes = await filterGroupRecipients(
+      fastify.redis,
+      fastify.config.CORE_URL,
+      fastify.config.INTERNAL_TOKEN,
+      socket.userId,
+      conv.memberIds,
+      fastify.log
+    );
+    permittedRecipients = filterRes.permitted;
 
-    if (peerBlockState.blocked) {
-      // Drop silently and ack sender with delivered: false
+    if (permittedRecipients.length === 0) {
+      // If NO members permit (all blocked or no other members) → ack delivered: false without storing
       socket.send(
         JSON.stringify({
           type: 'message.sent',
@@ -139,6 +133,42 @@ export async function handleMessageSend(
         })
       );
       return;
+    }
+  } else {
+    // 1:1 direct conversation
+    const peerId = conv.memberIds.find((m) => m !== socket.userId) || socket.userId;
+    if (peerId !== socket.userId) {
+      let peerBlockState = socket.blockedPeers.get(peerId);
+      if (!peerBlockState) {
+        // Lazy invalidation on cache miss
+        const isBlocked = await isPeerBlocked(
+          fastify.redis,
+          fastify.config.CORE_URL,
+          fastify.config.INTERNAL_TOKEN,
+          socket.userId,
+          peerId,
+          fastify.log
+        );
+        peerBlockState = { blocked: isBlocked };
+        socket.blockedPeers.set(peerId, peerBlockState);
+      }
+
+      if (peerBlockState.blocked) {
+        // Drop silently and ack sender with delivered: false
+        socket.send(
+          JSON.stringify({
+            type: 'message.sent',
+            payload: {
+              conversationId,
+              ...(clientId ? { clientId } : {}),
+              delivered: false,
+            },
+            ...(ackId !== undefined ? { ackId } : {}),
+          })
+        );
+        return;
+      }
+      permittedRecipients = [peerId];
     }
   }
 
@@ -188,20 +218,22 @@ export async function handleMessageSend(
     lastMessageId: messageRecord.id,
     lastMessageAt: messageRecord.createdAt,
     lastMessageBody: messageRecord.body,
-    otherUserId: peerId,
+    otherUserId: conv.kind === 'direct' ? (permittedRecipients[0] || null) : null,
     unreadDelta: 0,
   });
 
-  // Update user_conversations for recipient (unread +1)
-  await fastify.repos.userConversations.upsert({
-    userId: peerId,
-    conversationId,
-    lastMessageId: messageRecord.id,
-    lastMessageAt: messageRecord.createdAt,
-    lastMessageBody: messageRecord.body,
-    otherUserId: socket.userId,
-    unreadDelta: 1,
-  });
+  // Update user_conversations for permitted recipients (unread +1)
+  for (const recId of permittedRecipients) {
+    await fastify.repos.userConversations.upsert({
+      userId: recId,
+      conversationId,
+      lastMessageId: messageRecord.id,
+      lastMessageAt: messageRecord.createdAt,
+      lastMessageBody: messageRecord.body,
+      otherUserId: conv.kind === 'direct' ? socket.userId : null,
+      unreadDelta: 1,
+    });
+  }
 
   // Store idempotency key with TTL 5 min
   if (idemKey) {

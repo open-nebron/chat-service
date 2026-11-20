@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { isValidUuid } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
-import { isPeerBlocked } from '../lib/block-check.js';
+import { isPeerBlocked, filterGroupRecipients, checkBlockStatus } from '../lib/block-check.js';
 
 const getMessagesParamsSchema = z
   .object({
@@ -81,8 +81,29 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const messages = await fastify.repos.messages.listBefore(id, before, limit);
+      // NOTE: Filter must be applied AFTER pagination (fetch page, then filter) — otherwise hasMore math breaks.
+      const hasMore = messages.length === limit;
 
-      const formatted = messages.map((m) => ({
+      let filteredMessages = messages;
+      const otherSenderIds = Array.from(
+        new Set(messages.map((m) => m.senderId).filter((s) => s !== currentUserId))
+      );
+
+      if (otherSenderIds.length > 0 && fastify.config?.INTERNAL_TOKEN) {
+        const blockMap = await checkBlockStatus(
+          fastify.redis,
+          fastify.config.CORE_URL,
+          fastify.config.INTERNAL_TOKEN,
+          currentUserId,
+          otherSenderIds,
+          request.log
+        );
+        filteredMessages = messages.filter(
+          (m) => m.senderId === currentUserId || !blockMap.get(m.senderId)?.blocked
+        );
+      }
+
+      const formatted = filteredMessages.map((m) => ({
         id: m.id,
         conversationId: m.conversationId,
         senderId: m.senderId,
@@ -94,7 +115,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
 
       return reply.status(200).send({
         data: formatted,
-        hasMore: messages.length === limit,
+        hasMore,
       });
     }
   );
@@ -156,21 +177,41 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         throw new AppError('message_too_long', 'Message cannot exceed 4000 characters', 400);
       }
 
-      const recipientId =
-        conv.memberIds.find((m) => m !== currentUserId) || currentUserId;
+      let permittedRecipients: string[] = [];
 
-      // Check block state: if recipient has blocked sender, return 204 No Content silently
-      if (recipientId !== currentUserId && fastify.config?.INTERNAL_TOKEN) {
-        const isBlocked = await isPeerBlocked(
+      if (conv.kind === 'group') {
+        const filterRes = await filterGroupRecipients(
           fastify.redis,
           fastify.config.CORE_URL,
           fastify.config.INTERNAL_TOKEN,
           currentUserId,
-          recipientId,
+          conv.memberIds,
           request.log
         );
-        if (isBlocked) {
+        permittedRecipients = filterRes.permitted;
+
+        if (permittedRecipients.length === 0) {
+          // If NO members permit (all blocked or no other members) → 204 silent drop
           return reply.status(204).send();
+        }
+      } else {
+        const recipientId =
+          conv.memberIds.find((m) => m !== currentUserId) || currentUserId;
+
+        // Check block state: if recipient has blocked sender, return 204 No Content silently
+        if (recipientId !== currentUserId && fastify.config?.INTERNAL_TOKEN) {
+          const isBlocked = await isPeerBlocked(
+            fastify.redis,
+            fastify.config.CORE_URL,
+            fastify.config.INTERNAL_TOKEN,
+            currentUserId,
+            recipientId,
+            request.log
+          );
+          if (isBlocked) {
+            return reply.status(204).send();
+          }
+          permittedRecipients = [recipientId];
         }
       }
 
@@ -187,20 +228,22 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         lastMessageId: message.id,
         lastMessageAt: message.createdAt,
         lastMessageBody: message.body,
-        otherUserId: recipientId,
+        otherUserId: conv.kind === 'direct' ? (permittedRecipients[0] || null) : null,
         unreadDelta: 0,
       });
 
-      // Update user_conversations for recipient (unread +1)
-      await fastify.repos.userConversations.upsert({
-        userId: recipientId,
-        conversationId: id,
-        lastMessageId: message.id,
-        lastMessageAt: message.createdAt,
-        lastMessageBody: message.body,
-        otherUserId: currentUserId,
-        unreadDelta: 1,
-      });
+      // Update user_conversations for permitted recipients (unread +1)
+      for (const recId of permittedRecipients) {
+        await fastify.repos.userConversations.upsert({
+          userId: recId,
+          conversationId: id,
+          lastMessageId: message.id,
+          lastMessageAt: message.createdAt,
+          lastMessageBody: message.body,
+          otherUserId: conv.kind === 'direct' ? currentUserId : null,
+          unreadDelta: 1,
+        });
+      }
 
       const formatted = {
         id: message.id,

@@ -107,6 +107,20 @@ export class SubscriptionManager {
     }
   }
 
+  public async subscribeUserSockets(userId: string, channel: string): Promise<void> {
+    const sockets = this.getUserSockets(userId);
+    for (const s of sockets) {
+      await this.subscribe(s, channel);
+    }
+  }
+
+  public async unsubscribeUserSockets(userId: string, channel: string): Promise<void> {
+    const sockets = this.getUserSockets(userId);
+    for (const s of sockets) {
+      await this.unsubscribe(s, channel);
+    }
+  }
+
   public async unsubscribe(socket: ExtendedWebSocket, channel: string): Promise<void> {
     const sockets = this.channelSockets.get(channel);
     if (sockets) {
@@ -180,6 +194,30 @@ export class SubscriptionManager {
       // 1. Skip origin sending socket if originSocketId matches
       if (originSocketId && originSocketId === socket.id) {
         continue;
+      }
+
+      // Dynamic group subscription management per-user
+      if (channel.startsWith('ws:user:')) {
+        const convId = cleanPayload.payload?.conversationId;
+        if (convId) {
+          if (
+            cleanPayload.type === 'conversation.created' ||
+            cleanPayload.type === 'conversation.member_added'
+          ) {
+            this.subscribe(socket, `ws:conv:${convId}`).catch(() => {});
+          } else if (cleanPayload.type === 'conversation.member_removed') {
+            this.unsubscribe(socket, `ws:conv:${convId}`).catch(() => {});
+            try {
+              socket.send(
+                JSON.stringify({
+                  type: 'conversation.removed',
+                  payload: { conversationId: convId },
+                })
+              );
+            } catch {}
+            continue;
+          }
+        }
       }
 
       // 2. Block checking for presence updates

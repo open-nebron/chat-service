@@ -32,9 +32,33 @@ export async function runMigrations(
         created_at   timestamp,
         created_by   uuid,
         name         text,
+        owner_id     uuid,
+        member_count int,
         member_ids   set<uuid>,
         PRIMARY KEY (id)
       )
+    `);
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".conversations ADD owner_id uuid`);
+    } catch {
+      // Ignore if column already exists
+    }
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".conversations ADD member_count int`);
+    } catch {
+      // Ignore if column already exists
+    }
+
+    // 2b. conversation_members table
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS "${keyspace}".conversation_members (
+        conversation_id uuid,
+        user_id         uuid,
+        joined_at       timestamp,
+        role            text,
+        PRIMARY KEY ((conversation_id), joined_at, user_id)
+      ) WITH CLUSTERING ORDER BY (joined_at ASC, user_id ASC)
     `);
 
     // 3. messages table

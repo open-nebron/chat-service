@@ -1,0 +1,152 @@
+import cassandra from 'cassandra-driver';
+
+export interface ConversationMember {
+  userId: string;
+  joinedAt: Date;
+  role: 'owner' | 'member';
+}
+
+export class ConversationMembersRepository {
+  constructor(private readonly client: cassandra.Client) {}
+
+  async add(
+    conversationId: string,
+    userId: string,
+    role: 'owner' | 'member',
+    joinedAt: Date = new Date()
+  ): Promise<void> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+    const userUuid = cassandra.types.Uuid.fromString(userId);
+
+    const existingRole = await this.getRole(conversationId, userId);
+    if (existingRole) {
+      return;
+    }
+
+    await this.client.execute(
+      'INSERT INTO conversation_members (conversation_id, joined_at, user_id, role) VALUES (?, ?, ?, ?)',
+      [convUuid, joinedAt, userUuid, role],
+      { prepare: true }
+    );
+  }
+
+  async remove(conversationId: string, userId: string): Promise<void> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+    const userUuid = cassandra.types.Uuid.fromString(userId);
+
+    const result = await this.client.execute(
+      'SELECT joined_at, user_id FROM conversation_members WHERE conversation_id = ?',
+      [convUuid],
+      { prepare: true }
+    );
+
+    const row = result.rows.find((r) => r.user_id.toString() === userId);
+    if (row) {
+      await this.client.execute(
+        'DELETE FROM conversation_members WHERE conversation_id = ? AND joined_at = ? AND user_id = ?',
+        [convUuid, row.joined_at, userUuid],
+        { prepare: true }
+      );
+    }
+  }
+
+  async list(
+    conversationId: string,
+    limit: number = 50,
+    before?: Date
+  ): Promise<ConversationMember[]> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+
+    const result = await this.client.execute(
+      'SELECT user_id, joined_at, role FROM conversation_members WHERE conversation_id = ?',
+      [convUuid],
+      { prepare: true }
+    );
+
+    // Filter by before date if provided
+    let members = result.rows.map((row) => ({
+      userId: row.user_id.toString(),
+      joinedAt: row.joined_at,
+      role: (row.role as 'owner' | 'member') || 'member',
+    }));
+
+    if (before) {
+      members = members.filter((m) => m.joinedAt < before);
+    }
+
+    if (limit > 0) {
+      members = members.slice(0, limit);
+    }
+
+    return members;
+  }
+
+  async getRole(
+    conversationId: string,
+    userId: string
+  ): Promise<'owner' | 'member' | null> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+
+    const result = await this.client.execute(
+      'SELECT user_id, role FROM conversation_members WHERE conversation_id = ?',
+      [convUuid],
+      { prepare: true }
+    );
+
+    const row = result.rows.find((r) => r.user_id.toString() === userId);
+    if (!row) {
+      return null;
+    }
+
+    return (row.role as 'owner' | 'member') || null;
+  }
+
+  async count(conversationId: string): Promise<number> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+
+    const result = await this.client.execute(
+      'SELECT count(*) as total FROM conversation_members WHERE conversation_id = ?',
+      [convUuid],
+      { prepare: true }
+    );
+
+    const row = result.first();
+    if (!row) return 0;
+    return typeof row.total?.toNumber === 'function'
+      ? row.total.toNumber()
+      : Number(row.total);
+  }
+
+  async updateRole(
+    conversationId: string,
+    userId: string,
+    role: 'owner' | 'member'
+  ): Promise<void> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+    const userUuid = cassandra.types.Uuid.fromString(userId);
+
+    const result = await this.client.execute(
+      'SELECT joined_at, user_id FROM conversation_members WHERE conversation_id = ?',
+      [convUuid],
+      { prepare: true }
+    );
+
+    const row = result.rows.find((r) => r.user_id.toString() === userId);
+    if (row) {
+      await this.client.execute(
+        'UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND joined_at = ? AND user_id = ?',
+        [role, convUuid, row.joined_at, userUuid],
+        { prepare: true }
+      );
+    }
+  }
+
+  async removeAll(conversationId: string): Promise<void> {
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+    await this.client.execute(
+      'DELETE FROM conversation_members WHERE conversation_id = ?',
+      [convUuid],
+      { prepare: true }
+    );
+  }
+}

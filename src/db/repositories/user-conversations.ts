@@ -6,7 +6,7 @@ export interface UserConversation {
   lastMessageAt: Date;
   lastMessageId?: string | null;
   lastMessageBody?: string | null;
-  otherUserId: string;
+  otherUserId?: string | null;
   unreadCount: number;
 }
 
@@ -16,7 +16,7 @@ export interface UpsertUserConversationParams {
   lastMessageId?: string | null;
   lastMessageAt: Date;
   lastMessageBody?: string | null;
-  otherUserId: string;
+  otherUserId?: string | null;
   unreadDelta?: number;
 }
 
@@ -26,7 +26,9 @@ export class UserConversationsRepository {
   async upsert(params: UpsertUserConversationParams): Promise<void> {
     const userUuid = cassandra.types.Uuid.fromString(params.userId);
     const convUuid = cassandra.types.Uuid.fromString(params.conversationId);
-    const otherUserUuid = cassandra.types.Uuid.fromString(params.otherUserId);
+    const otherUserUuid = params.otherUserId
+      ? cassandra.types.Uuid.fromString(params.otherUserId)
+      : null;
 
     // Fetch existing rows for this user partition
     const existing = await this.client.execute(
@@ -106,7 +108,7 @@ export class UserConversationsRepository {
       lastMessageAt: row.last_message_at,
       lastMessageId: row.last_message_id ? row.last_message_id.toString() : null,
       lastMessageBody: row.last_message_body ?? null,
-      otherUserId: row.other_user_id.toString(),
+      otherUserId: row.other_user_id ? row.other_user_id.toString() : null,
       unreadCount: row.unread_count ?? 0,
     }));
   }
@@ -157,8 +159,31 @@ export class UserConversationsRepository {
       lastMessageAt: row.last_message_at,
       lastMessageId: row.last_message_id ? row.last_message_id.toString() : null,
       lastMessageBody: row.last_message_body ?? null,
-      otherUserId: row.other_user_id.toString(),
+      otherUserId: row.other_user_id ? row.other_user_id.toString() : null,
       unreadCount: row.unread_count ?? 0,
     };
+  }
+
+  async remove(conversationId: string, userId: string): Promise<void> {
+    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const convUuid = cassandra.types.Uuid.fromString(conversationId);
+
+    const existing = await this.client.execute(
+      'SELECT user_id, conversation_id, last_message_at FROM user_conversations WHERE user_id = ?',
+      [userUuid],
+      { prepare: true }
+    );
+
+    const rowsToDelete = existing.rows.filter(
+      (r) => r.conversation_id.toString() === conversationId
+    );
+
+    for (const r of rowsToDelete) {
+      await this.client.execute(
+        'DELETE FROM user_conversations WHERE user_id = ? AND last_message_at = ? AND conversation_id = ?',
+        [userUuid, r.last_message_at, convUuid],
+        { prepare: true }
+      );
+    }
   }
 }

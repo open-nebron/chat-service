@@ -97,6 +97,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
     subscriptionManager.registerUserSocket(socket);
 
     let convIds: string[] = [];
+    let presenceConvIds: string[] = [];
 
     // Frame handling
     socket.on('message', async (data: any) => {
@@ -172,7 +173,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
         const remaining = await presenceManager.onDisconnect(userId);
         if (remaining <= 0) {
           await presenceManager.publishPresenceUpdate(
-            convIds,
+            presenceConvIds,
             userId,
             false,
             new Date().toISOString()
@@ -187,16 +188,37 @@ const plugin: FastifyPluginAsync = async (fastify) => {
     try {
       const convs = await fastify.repos.userConversations.listForUser(userId, 100);
       convIds = convs.map((c) => c.conversationId);
-      const peerUserIds = convs.map((c) => c.otherUserId).filter(Boolean);
+
+      // Filter presence conversation IDs:
+      // v1 rule: If conversation.memberCount <= 20, publish presence normally.
+      // Cap presence fan-out to groups of <= 20, skip presence entirely for larger groups.
+      // TODO: In v2, for groups > 20, publish presence to sockets subscribed AND active in last 30 minutes.
+      const convObjects = await Promise.all(
+        convIds.map((cid) => fastify.repos.conversations.getById(cid))
+      );
+      presenceConvIds = convObjects
+        .filter((c) => c && ((c.memberCount ?? c.memberIds.length) <= 20))
+        .map((c) => c!.id);
+
+      // Collect all peers across all direct and group conversations
+      const allPeerIds = new Set<string>();
+      for (const c of convObjects) {
+        if (!c) continue;
+        for (const m of c.memberIds) {
+          if (m && m !== userId) {
+            allPeerIds.add(m);
+          }
+        }
+      }
 
       // Block state cache query
-      if (fastify.config.INTERNAL_TOKEN && peerUserIds.length > 0) {
+      if (fastify.config.INTERNAL_TOKEN && allPeerIds.size > 0) {
         const blockMap = await checkBlockStatus(
           fastify.redis,
           fastify.config.CORE_URL,
           fastify.config.INTERNAL_TOKEN,
           userId,
-          peerUserIds,
+          Array.from(allPeerIds),
           fastify.log
         );
         for (const [peerId, status] of blockMap) {
@@ -220,7 +242,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
     try {
       const socketCount = await presenceManager.onConnect(userId);
       if (socketCount === 1) {
-        await presenceManager.publishPresenceUpdate(convIds, userId, true);
+        await presenceManager.publishPresenceUpdate(presenceConvIds, userId, true);
       }
       // Refresh presence every 5 minutes
       socket.presenceTimer = setInterval(() => {

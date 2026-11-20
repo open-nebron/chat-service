@@ -92,7 +92,11 @@ describe('WS and HTTP Block Enforcement', () => {
     );
 
     // Wait for event consumer to process
-    await new Promise((r) => setTimeout(r, 200));
+    for (let i = 0; i < 20; i++) {
+      const cached = await redis.get(`rel:${userB}:${userA}`);
+      if (cached) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
     let bReceivedMessage = false;
     wsB.on('message', (raw) => {
@@ -169,7 +173,11 @@ describe('WS and HTTP Block Enforcement', () => {
     );
 
     // Give consumer time to process unblock
-    await new Promise((r) => setTimeout(r, 200));
+    for (let i = 0; i < 20; i++) {
+      const cached = await redis.get(`rel:${userB}:${userA}`);
+      if (!cached) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
     const tokenA = await createTestToken(userA);
     const tokenB = await createTestToken(userB);
@@ -221,7 +229,12 @@ describe('WS and HTTP Block Enforcement', () => {
         at: new Date().toISOString(),
       })
     );
-    await new Promise((r) => setTimeout(r, 200));
+    // Wait for event consumer to process block
+    for (let i = 0; i < 20; i++) {
+      const cached = await redis.get(`rel:${userB}:${userA}`);
+      if (cached) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
     const tokenB = await createTestToken(userB);
     const wsB = trackSocket(new WebSocket(getWsUrl(app, tokenB)));

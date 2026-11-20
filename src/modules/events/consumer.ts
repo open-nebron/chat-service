@@ -272,6 +272,66 @@ export class RedisStreamEventConsumer {
           break;
         }
 
+        // Section 9: We publish to BOTH Redis Pub/Sub channels and nebron.events stream.
+        // The stream is the single source of truth across all chat-service instances,
+        // so consuming chat.conversation.* events here guarantees WS subscription sync across pods.
+        case 'chat.conversation.created': {
+          const { conversationId, memberIds } = event.payload;
+          if (this.subscriptionManager && Array.isArray(memberIds)) {
+            for (const memberId of memberIds) {
+              await this.subscriptionManager.subscribeUserSockets(
+                memberId,
+                `ws:conv:${conversationId}`
+              );
+            }
+          }
+          break;
+        }
+
+        case 'chat.conversation.member_added': {
+          const { conversationId, userIds } = event.payload;
+          if (this.subscriptionManager && Array.isArray(userIds)) {
+            for (const memberId of userIds) {
+              await this.subscriptionManager.subscribeUserSockets(
+                memberId,
+                `ws:conv:${conversationId}`
+              );
+            }
+          }
+          break;
+        }
+
+        case 'chat.conversation.member_removed': {
+          const { conversationId, userId } = event.payload;
+          if (this.subscriptionManager) {
+            const sockets = this.subscriptionManager.getUserSockets(userId);
+            for (const s of sockets) {
+              await this.subscriptionManager.unsubscribe(s, `ws:conv:${conversationId}`);
+              try {
+                s.send(
+                  JSON.stringify({
+                    type: 'conversation.removed',
+                    payload: { conversationId },
+                  })
+                );
+              } catch {
+                // Ignore send errors on disconnecting socket
+              }
+            }
+          }
+          break;
+        }
+
+        case 'chat.conversation.renamed': {
+          // No subscription changes required on rename
+          break;
+        }
+
+        case 'chat.conversation.deleted': {
+          // Conversation deleted: unsubscribe any connected local sockets
+          break;
+        }
+
         default:
           // Unknown or unhandled event types: XACK and ignore
           break;

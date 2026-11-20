@@ -114,3 +114,32 @@ export async function isPeerBlocked(
   const map = await checkBlockStatus(redis, coreUrl, internalToken, userId, [peerUserId], logger);
   return map.get(peerUserId)?.blocked ?? false;
 }
+
+export async function filterGroupRecipients(
+  redis: Redis,
+  coreUrl: string,
+  internalToken: string,
+  senderId: string,
+  memberIds: string[],
+  logger?: any
+): Promise<{ permitted: string[]; blocked: string[] }> {
+  const peers = Array.from(new Set(memberIds)).filter((id) => id && id !== senderId);
+  if (peers.length === 0) {
+    return { permitted: [], blocked: [] };
+  }
+
+  const map = await checkBlockStatus(redis, coreUrl, internalToken, senderId, peers, logger);
+  const permitted: string[] = [];
+  const blocked: string[] = [];
+
+  for (const peerId of peers) {
+    const isBlocked = map.get(peerId)?.blocked ?? false;
+    if (isBlocked) {
+      blocked.push(peerId);
+    } else {
+      permitted.push(peerId);
+    }
+  }
+
+  return { permitted, blocked };
+}

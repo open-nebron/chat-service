@@ -41,8 +41,18 @@ CREATE TABLE IF NOT EXISTS conversations (
   created_by   uuid,
   name         text,
   member_ids   set<uuid>,
+  owner_id     uuid,
+  member_count int,
   PRIMARY KEY (id)
 );
+
+CREATE TABLE IF NOT EXISTS conversation_members (
+  conversation_id uuid,
+  user_id         uuid,
+  joined_at       timestamp,
+  role            text,     -- 'owner' | 'member' (admin in v2)
+  PRIMARY KEY ((conversation_id), joined_at, user_id)
+) WITH CLUSTERING ORDER BY (joined_at ASC, user_id ASC);
 
 CREATE TABLE IF NOT EXISTS messages (
   conversation_id uuid,
@@ -74,6 +84,11 @@ CREATE TABLE IF NOT EXISTS user_conversations (
   PRIMARY KEY ((user_id), last_message_at, conversation_id)
 ) WITH CLUSTERING ORDER BY (last_message_at DESC, conversation_id ASC);
 ```
+
+### Schema Design & Membership Truth
+- `conversation_members` is the **single source of truth** for group membership. Because ScyllaDB sets (`set<uuid>`) operate under last-write-wins semantics on concurrent mutations, mutating a set directly during simultaneous joins/leaves can introduce data loss. The `conversation_members` table provides atomic per-user row additions and deletions.
+- `conversations.member_ids` is maintained as a **denormalized set cache** updated best-effort on membership changes to optimize fast-path authorization and peer discovery on WebSocket connect.
+- For 1:1 direct conversations, `user_conversations.other_user_id` stores the peer user ID; for group conversations, `other_user_id` is `null` and metadata is fetched from `conversations`.
 
 ### Deterministic Conversation IDs
 For 1:1 direct conversations, IDs are computed deterministically:
@@ -246,6 +261,150 @@ curl -X DELETE http://localhost:4003/conversations/e4f8a61b-90a3-5c24-9b2f-7848d
   -H "Authorization: Bearer $TOKEN"
 ```
 Response: HTTP 204 No Content
+
+---
+
+## Group Messaging API
+
+The Chat Service supports multi-user group conversations with atomic membership management, owner privileges, and intelligent per-user block filtering.
+
+### Rate Limits (per authenticated user)
+- `POST /conversations/group`: 5 requests / minute
+- `POST /conversations/:id/members`: 10 requests / minute
+- `DELETE /conversations/:id/members/:userId`: 20 requests / minute
+- `PATCH /conversations/:id`: 10 requests / minute
+- `GET /conversations/:id/members`: 60 requests / minute
+
+### Group Constraints & Rules
+- **Member Cap**: Maximum 100 members per group (enforced at group creation and member additions).
+- **Owner Role**: Group creator is designated as `'owner'`. Only the owner can add members, remove members, or rename the group.
+- **Ownership Transfer**: If the owner leaves the group, ownership automatically transfers to the member with the earliest `joined_at` timestamp in `conversation_members`. If the owner is the last member and leaves, the group and its associated data are deleted.
+- **Name Validation**: Display name must be 2–100 characters. Control characters are stripped, whitespace trimmed, and HTML tags rejected.
+
+---
+
+### Curl Examples
+
+#### 1. Create a Group Conversation (`POST /conversations/group`)
+Rate Limit: 5/min. Creates a new group with the caller as owner:
+```bash
+curl -X POST http://localhost:4003/conversations/group \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Backend Team",
+    "memberIds": [
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333"
+    ]
+  }'
+```
+Response (201 Created):
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "kind": "group",
+    "name": "Backend Team",
+    "ownerId": "11111111-1111-4111-8111-111111111111",
+    "memberIds": [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333"
+    ],
+    "memberCount": 3,
+    "createdAt": "2026-11-20T19:00:00.000Z"
+  }
+}
+```
+
+#### 2. Add Members to Group (`POST /conversations/:id/members`)
+Rate Limit: 10/min. Caller must be group owner:
+```bash
+curl -X POST http://localhost:4003/conversations/a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d/members \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userIds": ["44444444-4444-4444-8444-444444444444"]
+  }'
+```
+Response (200 OK):
+```json
+{
+  "data": {
+    "conversationId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "added": ["44444444-4444-4444-8444-444444444444"],
+    "memberCount": 4
+  }
+}
+```
+
+#### 3. Remove Member or Leave Group (`DELETE /conversations/:id/members/:userId`)
+Rate Limit: 20/min. To leave, pass your own `userId`. To remove someone else, caller must be owner:
+```bash
+curl -X DELETE http://localhost:4003/conversations/a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d/members/44444444-4444-4444-8444-444444444444 \
+  -H "Authorization: Bearer $TOKEN"
+```
+Response: HTTP 204 No Content
+
+#### 4. Rename Group (`PATCH /conversations/:id`)
+Rate Limit: 10/min. Caller must be group owner:
+```bash
+curl -X PATCH http://localhost:4003/conversations/a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Core Engineering"}'
+```
+Response (200 OK):
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "kind": "group",
+    "name": "Core Engineering",
+    "ownerId": "11111111-1111-4111-8111-111111111111",
+    "memberIds": [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333"
+    ],
+    "memberCount": 3,
+    "createdAt": "2026-11-20T19:00:00.000Z"
+  }
+}
+```
+
+#### 5. List Group Members (`GET /conversations/:id/members`)
+Rate Limit: 60/min. Caller must be conversation member:
+```bash
+curl -X GET "http://localhost:4003/conversations/a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d/members?limit=50" \
+  -H "Authorization: Bearer $TOKEN"
+```
+Response (200 OK):
+```json
+{
+  "data": [
+    {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "role": "owner",
+      "joinedAt": "2026-11-20T19:00:00.000Z"
+    },
+    {
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "role": "member",
+      "joinedAt": "2026-11-20T19:00:00.000Z"
+    }
+  ],
+  "hasMore": false
+}
+```
+
+#### 6. Filter Conversations by Kind (`GET /conversations?kind=group`)
+Rate Limit: 300/min. Supports `kind=direct`, `kind=group`, or `kind=all` (default):
+```bash
+curl -X GET "http://localhost:4003/conversations?kind=group" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ---
 
@@ -425,11 +584,18 @@ Nebron enforces a strict three-layer defense to guarantee blocked users cannot d
    - `core.relationship.unblocked`: Removes blocks in connected sockets and clears the Redis cache.
 3. **Lazy Core Invalidation**: On cache miss during `message.send`, a single-user check is dispatched to `core-backend` and cached for 300 seconds.
 
-**Blocked Semantics**:
-- Sending to a blocking user drops the message silently without DB persistence.
-- Over WebSocket: Sender receives `{ type: "message.sent", payload: { delivered: false } }`.
-- Over HTTP: Sender receives `HTTP 204 No Content`.
-- Recipient receives zero notification, zero frames, and zero presence updates from blocked users.
+### Block Semantics: Direct vs Group Conversations
+
+| Feature | 1:1 Direct Conversations | Group Conversations |
+|---|---|---|
+| **Delivery Criteria** | If peer blocks sender, message is dropped entirely | Message is delivered unless **all** non-sender members have blocked the sender |
+| **Database Persistence** | Dropped silently (not saved in ScyllaDB) | Saved to ScyllaDB if at least one member has not blocked sender |
+| **HTTP Send (`POST /messages`)** | Returns `204 No Content` if blocked | Returns `204 No Content` if all non-sender members blocked; `201 Created` otherwise |
+| **WebSocket Send (`message.send`)** | Ack returns `delivered: false` | Ack returns `delivered: false` if all members blocked; `delivered: true` otherwise |
+| **WebSocket Real-Time Fan-Out** | Recipient receives nothing | Excluded per-member: blocked recipients never receive `message.new` |
+| **HTTP Message History (`GET /messages`)** | Recipient sees nothing | Post-pagination filter: caller never sees messages from users they blocked |
+| **Typing Indicators** | Dropped if peer blocked sender | Filtered: only members who have not blocked the sender receive `typing.update` |
+| **Presence Updates** | Dropped if mutual relationship is blocked | Capped to groups with $\le 20$ members; omitted for blocked peers |
 
 ---
 
