@@ -486,3 +486,20 @@ npm run build
 OpenAPI 3.1 documentation with full schemas and Try-It-Out functionality is served at:
 - Swagger UI: `http://localhost:4003/docs`
 - Raw OpenAPI JSON: `http://localhost:4003/docs/json`
+
+---
+
+## Development notes
+
+### Vendored shared-contracts
+chat-service consumes @nebron/contracts via a tarball in vendor/
+for reproducible Docker builds. To update the contracts:
+
+  cd ../shared-contracts && npm pack --pack-destination ../chat-service/vendor
+
+Then bump the version in chat-service/package.json to match the new
+tarball, run npm install, and rebuild. The tarball is committed to
+git intentionally — it makes Docker builds hermetic.
+
+Future: migrate to GitHub Packages or a private npm registry once
+the org has one.

@@ -3,18 +3,16 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-# Copy shared contracts first for local file dependency
-COPY shared-contracts /shared-contracts
-
-# Copy chat-service package manifests
-COPY chat-service/package*.json ./
+# Copy package manifests and vendored contracts
+COPY package*.json ./
+COPY vendor/ ./vendor/
 
 # Install all dependencies
 RUN npm ci
 
 # Copy tsconfig and sources
-COPY chat-service/tsconfig.json ./
-COPY chat-service/src ./src
+COPY tsconfig.json ./
+COPY src/ ./src/
 
 # Compile TypeScript
 RUN npm run build
@@ -31,10 +29,10 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=4003
 
-# Copy production files, specs, and shared-contracts
-COPY --chown=nebron:nebron chat-service/package*.json ./
-COPY --chown=nebron:nebron chat-service/openapi.yaml ./openapi.yaml
-COPY --chown=nebron:nebron --from=build /shared-contracts /shared-contracts
+# Copy production files, specs, and vendored contracts
+COPY --chown=nebron:nebron package*.json ./
+COPY --chown=nebron:nebron openapi.yaml ./openapi.yaml
+COPY --chown=nebron:nebron vendor/ ./vendor/
 COPY --chown=nebron:nebron --from=build /app/node_modules ./node_modules
 RUN npm prune --omit=dev
 

@@ -33,38 +33,25 @@ jobs:
           --developer-mode 1
 
     steps:
-      - name: Checkout chat-service
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: chat-service
-
-      - name: Checkout shared-contracts
-        uses: actions/checkout@v4
-        with:
-          repository: open-nebron/shared-contracts
-          path: shared-contracts
 
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
-          cache-dependency-path: chat-service/package-lock.json
 
       - name: Install dependencies
-        working-directory: chat-service
         run: npm ci
 
       - name: Run linter
-        working-directory: chat-service
         run: npm run lint
 
       - name: Compile TypeScript
-        working-directory: chat-service
         run: npm run build
 
       - name: Wait for ScyllaDB
-        working-directory: chat-service
         run: |
           node -e "
             import('cassandra-driver').then(async ({ default: cassandra }) => {
@@ -85,7 +72,6 @@ jobs:
           "
 
       - name: Run test suite
-        working-directory: chat-service
         run: npm test
 
   docker-build:
@@ -94,19 +80,11 @@ jobs:
     needs: [build-and-test]
 
     steps:
-      - name: Checkout chat-service
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: chat-service
-
-      - name: Checkout shared-contracts
-        uses: actions/checkout@v4
-        with:
-          repository: open-nebron/shared-contracts
-          path: shared-contracts
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        run: docker build -f chat-service/Dockerfile -t nebron-chat-service:ci .
+        run: docker build -t nebron-chat-service:ci .
