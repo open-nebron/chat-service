@@ -12,6 +12,7 @@ function sanitizeGroupName(name: unknown): string {
     throw new AppError('invalid_payload', 'Group name cannot contain HTML', 400);
   }
   // Strip control chars except space
+  // eslint-disable-next-line no-control-regex
   const sanitized = name.replace(/[\u0000-\u001F\u007F]/g, '').trim();
   if (sanitized.length < 2 || sanitized.length > 100) {
     throw new AppError('invalid_payload', 'Group name must be 2-100 characters', 400);
@@ -347,7 +348,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
               },
             })
           );
-        } catch {}
+        } catch {
+          // Ignore
+        }
       }
 
       try {
@@ -363,7 +366,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             },
           })
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       // Publish event to nebron.events
       try {
@@ -380,7 +385,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             at: nowIso,
           })
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       return reply.status(200).send({
         data: {
@@ -463,7 +470,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
                 at: nowIso,
               })
             );
-          } catch {}
+          } catch {
+            // Ignore
+          }
         } else {
           // Transfer ownership to earliest-joined remaining member
           const earliest = remaining[0]!;
@@ -490,7 +499,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             payload: removedPayload,
           })
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       try {
         await fastify.redis.publish(
@@ -500,7 +511,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             payload: removedPayload,
           })
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       // Publish event to nebron.events
       try {
@@ -512,7 +525,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
           'payload',
           JSON.stringify(removedPayload)
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       return reply.status(204).send();
     }
@@ -579,7 +594,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             },
           })
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       // Publish event to nebron.events
       try {
@@ -596,7 +613,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             at: nowIso,
           })
         );
-      } catch {}
+      } catch {
+        // Ignore
+      }
 
       const updated = await fastify.repos.conversations.getById(id);
       return reply.status(200).send({ data: updated });

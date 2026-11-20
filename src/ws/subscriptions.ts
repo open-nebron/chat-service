@@ -214,7 +214,9 @@ export class SubscriptionManager {
                   payload: { conversationId: convId },
                 })
               );
-            } catch {}
+            } catch {
+              // Ignore
+            }
             continue;
           }
         }
