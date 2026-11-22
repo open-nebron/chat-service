@@ -183,6 +183,20 @@ export class SubscriptionManager {
       return;
     }
 
+    // Voice signaling forwarder: forward verbatim to connected sockets for this user
+    if (channel.startsWith('ws:signal:')) {
+      for (const socket of sockets) {
+        if (socket.readyState === 1) {
+          try {
+            socket.send(JSON.stringify(msg));
+          } catch {
+            // Socket send error, ignore
+          }
+        }
+      }
+      return;
+    }
+
     const { originSocketId, ...cleanPayload } = msg;
 
     for (const socket of sockets) {

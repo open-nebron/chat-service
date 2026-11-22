@@ -655,6 +655,12 @@ OpenAPI 3.1 documentation with full schemas and Try-It-Out functionality is serv
 
 ---
 
+## Voice Signaling Forwarder
+
+Voice signaling forwarder — chat-service subscribes to `ws:signal:{userId}` and forwards frames to connected clients. Voice-service owns the payload format. See `route-docs/voice/ws-signal.md`.
+
+---
+
 ## Development notes
 
 ### Vendored shared-contracts
