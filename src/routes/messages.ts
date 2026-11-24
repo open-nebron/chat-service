@@ -321,6 +321,18 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
           forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
         });
 
+        try {
+          await fastify.search.indexMessage({
+            id: message.id,
+            conversationId: id,
+            senderId: currentUserId,
+            body: sanitized,
+            createdAt: message.createdAt,
+          });
+        } catch (err) {
+          request.log.warn({ err: (err as Error).message }, 'Failed to index message in search');
+        }
+
         const recipientId =
           conv.memberIds.find((m) => m !== currentUserId) || null;
 
@@ -427,6 +439,18 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         forwardedFromSenderId: forwardOf ? forwardSenderId : null,
         forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
       });
+
+      try {
+        await fastify.search.indexMessage({
+          id: message.id,
+          conversationId: id,
+          senderId: currentUserId,
+          body: sanitized,
+          createdAt: message.createdAt,
+        });
+      } catch (err) {
+        request.log.warn({ err: (err as Error).message }, 'Failed to index message in search');
+      }
 
       // Update user_conversations for sender (unread unchanged)
       await fastify.repos.userConversations.upsert({
@@ -691,6 +715,11 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       await fastify.repos.messages.softDelete(id, messageId, currentUserId);
+      try {
+        await fastify.search.deleteMessage(messageId);
+      } catch (err) {
+        request.log.warn({ err: (err as Error).message }, 'Failed to delete message in search');
+      }
 
       // Broadcast message.deleted to ws:conv channel and direct user channels
       const deletePayload = {
@@ -804,6 +833,11 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
 
       const newEditCount = (msg.editCount ?? 0) + 1;
       const updated = await fastify.repos.messages.updateBody(id, messageId, sanitized, newEditCount);
+      try {
+        await fastify.search.updateMessage(messageId, sanitized);
+      } catch (err) {
+        request.log.warn({ err: (err as Error).message }, 'Failed to update message in search');
+      }
 
       const formatted = {
         id: updated.id,

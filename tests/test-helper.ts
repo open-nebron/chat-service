@@ -131,6 +131,8 @@ export async function createRealTestApp(
     WS_RATE_LIMIT_BYTES_PER_SEC: 65536,
     WS_MAX_FRAME_BYTES: 32768,
     PRESENCE_TTL_SECONDS: 3600,
+    MEILI_HOST: 'http://127.0.0.1:7700',
+    MEILI_MASTER_KEY: 'masterKeyChangeMeInProd123',
     ...configOverrides,
   };
 

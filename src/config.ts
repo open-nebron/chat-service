@@ -39,6 +39,8 @@ export const configSchema = z.object({
   WS_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().positive().default(65536),
   WS_MAX_FRAME_BYTES: z.coerce.number().int().positive().default(32768),
   PRESENCE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+  MEILI_HOST: z.string().default('http://localhost:7700'),
+  MEILI_MASTER_KEY: z.string().default('masterKeyChangeMeInProd123'),
 });
 
 export type Config = z.infer<typeof configSchema>;

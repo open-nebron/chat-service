@@ -15,6 +15,8 @@ import { runMigrations } from './db/migrate.js';
 import { healthRoutes } from './routes/health.js';
 import { conversationsRoutes } from './routes/conversations.js';
 import { messagesRoutes } from './routes/messages.js';
+import { searchRoutes } from './routes/search.js';
+import { searchPlugin, type SearchPluginOptions } from './plugins/search.js';
 import { AppError } from './lib/errors.js';
 
 declare module 'fastify' {
@@ -29,6 +31,8 @@ export interface BuildAppOptions {
   scyllaClient?: ScyllaPluginOptions['client'];
   redisClient?: RedisPluginOptions['client'];
   jwksKeySet?: JwtPluginOptions['keySet'];
+  searchClient?: SearchPluginOptions['client'];
+  searchService?: SearchPluginOptions['searchService'];
 }
 
 export async function buildApp(
@@ -88,6 +92,13 @@ export async function buildApp(
   // Register repositories
   await app.register(reposPlugin);
 
+  // Register search plugin
+  await app.register(searchPlugin, {
+    config: cfg,
+    client: options.searchClient,
+    searchService: options.searchService,
+  });
+
   // Register websocket plugin
   await app.register(wsPlugin);
 
@@ -142,6 +153,7 @@ export async function buildApp(
   await app.register(healthRoutes);
   await app.register(conversationsRoutes);
   await app.register(messagesRoutes);
+  await app.register(searchRoutes);
 
   // Start Redis stream event consumer for nebron.events
   if (isRealRedis && cfg.REDIS_URL) {

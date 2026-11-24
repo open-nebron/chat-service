@@ -300,6 +300,18 @@ export async function handleMessageSend(
       forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
     });
 
+    try {
+      await fastify.search.indexMessage({
+        id: messageRecord.id,
+        conversationId,
+        senderId: socket.userId,
+        body: sanitized,
+        createdAt: messageRecord.createdAt,
+      });
+    } catch (err) {
+      fastify.log.warn({ err: (err as Error).message }, 'Failed to index message in search');
+    }
+
     const recipientId = conv.memberIds.find((m) => m !== socket.userId) || null;
 
     await fastify.repos.userConversations.upsert({
@@ -434,6 +446,18 @@ export async function handleMessageSend(
     forwardedFromSenderId: forwardOf ? forwardSenderId : null,
     forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
   });
+
+  try {
+    await fastify.search.indexMessage({
+      id: messageRecord.id,
+      conversationId,
+      senderId: socket.userId,
+      body: sanitized,
+      createdAt: messageRecord.createdAt,
+    });
+  } catch (err) {
+    fastify.log.warn({ err: (err as Error).message }, 'Failed to index message in search');
+  }
 
   // Update user_conversations for sender (unread unchanged)
   await fastify.repos.userConversations.upsert({
