@@ -9,6 +9,7 @@ export interface Message {
   body: string;
   createdAt: Date;
   editedAt?: Date | null;
+  editCount?: number;
   deleted: boolean;
 }
 
@@ -26,7 +27,7 @@ export class MessagesRepository {
     const now = new Date();
 
     await this.client.execute(
-      'INSERT INTO messages (conversation_id, message_id, sender_id, body, created_at, edited_at, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [
         cassandra.types.Uuid.fromString(params.conversationId),
         messageId,
@@ -35,6 +36,7 @@ export class MessagesRepository {
         now,
         null,
         false,
+        0,
       ],
       { prepare: true }
     );
@@ -46,6 +48,7 @@ export class MessagesRepository {
       body: params.body,
       createdAt: now,
       editedAt: null,
+      editCount: 0,
       deleted: false,
     };
   }
@@ -60,7 +63,7 @@ export class MessagesRepository {
 
     if (before) {
       query =
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted FROM messages WHERE conversation_id = ? AND message_id < ? LIMIT ?';
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count FROM messages WHERE conversation_id = ? AND message_id < ? LIMIT ?';
       params = [
         cassandra.types.Uuid.fromString(conversationId),
         cassandra.types.TimeUuid.fromString(before),
@@ -68,7 +71,7 @@ export class MessagesRepository {
       ];
     } else {
       query =
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted FROM messages WHERE conversation_id = ? LIMIT ?';
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count FROM messages WHERE conversation_id = ? LIMIT ?';
       params = [cassandra.types.Uuid.fromString(conversationId), limit];
     }
 
@@ -81,13 +84,14 @@ export class MessagesRepository {
       body: row.body,
       createdAt: row.created_at,
       editedAt: row.edited_at,
+      editCount: row.edit_count ?? 0,
       deleted: row.deleted,
     }));
   }
 
   async getById(conversationId: string, messageId: string): Promise<Message | null> {
     const result = await this.client.execute(
-      'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted FROM messages WHERE conversation_id = ? AND message_id = ?',
+      'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count FROM messages WHERE conversation_id = ? AND message_id = ?',
       [
         cassandra.types.Uuid.fromString(conversationId),
         cassandra.types.TimeUuid.fromString(messageId),
@@ -107,6 +111,7 @@ export class MessagesRepository {
       body: row.body,
       createdAt: row.created_at,
       editedAt: row.edited_at,
+      editCount: row.edit_count ?? 0,
       deleted: row.deleted,
     };
   }
@@ -136,5 +141,31 @@ export class MessagesRepository {
       ],
       { prepare: true }
     );
+  }
+
+  async updateBody(
+    conversationId: string,
+    messageId: string,
+    newBody: string,
+    editCount: number
+  ): Promise<Message> {
+    const now = new Date();
+    await this.client.execute(
+      'UPDATE messages SET body = ?, edited_at = ?, edit_count = ? WHERE conversation_id = ? AND message_id = ?',
+      [
+        newBody,
+        now,
+        editCount,
+        cassandra.types.Uuid.fromString(conversationId),
+        cassandra.types.TimeUuid.fromString(messageId),
+      ],
+      { prepare: true }
+    );
+
+    const updated = await this.getById(conversationId, messageId);
+    if (!updated) {
+      throw new NotFoundError('message_not_found', 'Message not found');
+    }
+    return updated;
   }
 }

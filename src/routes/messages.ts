@@ -36,6 +36,33 @@ const deleteMessageParamsSchema = z
   })
   .strict();
 
+const patchMessageBodySchema = z
+  .object({
+    body: z.string(),
+  })
+  .strict();
+
+const patchMessageParamsSchema = z
+  .object({
+    id: z.string(),
+    messageId: z.string(),
+  })
+  .strict();
+
+const starMessageParamsSchema = z
+  .object({
+    id: z.string(),
+    messageId: z.string(),
+  })
+  .strict();
+
+const getStarredQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+    before: z.string().optional(),
+  })
+  .strict();
+
 export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /conversations/:id/messages?limit=30&before=<messageId> (300/min)
   fastify.get(
@@ -312,8 +339,8 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
             },
           })
         );
-      } catch (err: any) {
-        request.log.warn({ err: err.message }, 'Failed publishing new message to Redis');
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing new message to Redis');
       }
 
       return reply.status(201).send({
@@ -443,8 +470,8 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
             payload: deletePayload,
           })
         );
-      } catch (err: any) {
-        request.log.warn({ err: err.message }, 'Failed publishing message.deleted to ws:conv');
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing message.deleted to ws:conv');
       }
 
       for (const mId of conv.memberIds) {
@@ -462,6 +489,343 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(204).send();
+    }
+  );
+
+  // PATCH /conversations/:id/messages/:messageId (10/min)
+  fastify.patch(
+    '/conversations/:id/messages/:messageId',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = patchMessageParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id or message id', 400);
+      }
+
+      const bodyResult = patchMessageBodySchema.safeParse(request.body);
+      if (!bodyResult.success) {
+        throw new AppError('invalid_payload', bodyResult.error.message, 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const msg = await fastify.repos.messages.getById(id, messageId);
+      if (!msg) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      if (msg.senderId !== currentUserId) {
+        throw new ForbiddenError('not_message_owner', 'You can only edit your own messages');
+      }
+
+      if (msg.deleted) {
+        throw new AppError('message_deleted', 'Cannot edit a deleted message', 400);
+      }
+
+      if ((msg.editCount ?? 0) >= 10) {
+        throw new AppError('edit_limit_reached', 'Message cannot be edited more than 10 times', 400);
+      }
+
+      const rawBody = bodyResult.data.body;
+      if (rawBody.includes('\u0000')) {
+        throw new AppError('invalid_payload', 'Message cannot contain null bytes', 400);
+      }
+
+      const sanitized = rawBody
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+        .trim();
+
+      if (sanitized.length === 0) {
+        throw new AppError('empty_message', 'Message body cannot be empty', 400);
+      }
+
+      if (sanitized.length > 4000) {
+        throw new AppError('message_too_long', 'Message cannot exceed 4000 characters', 400);
+      }
+
+      const newEditCount = (msg.editCount ?? 0) + 1;
+      const updated = await fastify.repos.messages.updateBody(id, messageId, sanitized, newEditCount);
+
+      const formatted = {
+        id: updated.id,
+        conversationId: updated.conversationId,
+        senderId: updated.senderId,
+        body: updated.body,
+        createdAt: updated.createdAt.toISOString(),
+        editedAt: updated.editedAt ? updated.editedAt.toISOString() : null,
+        deleted: updated.deleted,
+      };
+
+      const editPayload = {
+        conversationId: id,
+        messageId,
+        senderId: currentUserId,
+        body: updated.body,
+        editedAt: updated.editedAt ? updated.editedAt.toISOString() : new Date().toISOString(),
+        message: formatted,
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({
+            type: 'message.edited',
+            payload: editPayload,
+          })
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing message.edited to ws:conv');
+      }
+
+      for (const mId of conv.memberIds) {
+        try {
+          await fastify.redis.publish(
+            `ws:user:${mId}`,
+            JSON.stringify({
+              type: 'message.edited',
+              payload: editPayload,
+            })
+          );
+        } catch {
+          // Ignore
+        }
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.message.edited',
+          'payload',
+          JSON.stringify({
+            conversationId: id,
+            messageId,
+            senderId: currentUserId,
+            body: updated.body,
+            editedAt: updated.editedAt ? updated.editedAt.toISOString() : new Date().toISOString(),
+          })
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing chat.message.edited to nebron.events');
+      }
+
+      return reply.status(200).send({ data: formatted });
+    }
+  );
+
+  // POST /conversations/:id/messages/:messageId/star (60/min, idempotent)
+  fastify.post(
+    '/conversations/:id/messages/:messageId/star',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = starMessageParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id or message id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const msg = await fastify.repos.messages.getById(id, messageId);
+      if (!msg) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      const starredAt = await fastify.repos.starredMessages.add(currentUserId, id, messageId);
+
+      const starPayload = {
+        userId: currentUserId,
+        conversationId: id,
+        messageId,
+        starredAt: starredAt.toISOString(),
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:user:${currentUserId}`,
+          JSON.stringify({
+            type: 'message.starred',
+            payload: starPayload,
+          })
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing message.starred to ws:user');
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.message.starred',
+          'payload',
+          JSON.stringify(starPayload)
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing chat.message.starred to nebron.events');
+      }
+
+      return reply.status(204).send();
+    }
+  );
+
+  // DELETE /conversations/:id/messages/:messageId/star (60/min, idempotent)
+  fastify.delete(
+    '/conversations/:id/messages/:messageId/star',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = starMessageParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id or message id', 400);
+      }
+
+      const currentUserId = request.user!.userId;
+      await fastify.repos.starredMessages.remove(currentUserId, id, messageId);
+
+      const now = new Date();
+      const unstarPayload = {
+        userId: currentUserId,
+        conversationId: id,
+        messageId,
+        at: now.toISOString(),
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:user:${currentUserId}`,
+          JSON.stringify({
+            type: 'message.unstarred',
+            payload: unstarPayload,
+          })
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing message.unstarred to ws:user');
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.message.unstarred',
+          'payload',
+          JSON.stringify(unstarPayload)
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing chat.message.unstarred to nebron.events');
+      }
+
+      return reply.status(204).send();
+    }
+  );
+
+  // GET /starred?limit=30&before=<ISO> (60/min)
+  fastify.get(
+    '/starred',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const queryResult = getStarredQuerySchema.safeParse(request.query);
+      if (!queryResult.success) {
+        throw new AppError('invalid_payload', queryResult.error.message, 400);
+      }
+
+      const { limit, before } = queryResult.data;
+      const currentUserId = request.user!.userId;
+
+      const rows = await fastify.repos.starredMessages.listForUser(currentUserId, limit, before);
+      const hasMore = rows.length === limit;
+
+      const data = await Promise.all(
+        rows.map(async (row) => {
+          const msg = await fastify.repos.messages.getById(row.conversationId, row.messageId);
+          return {
+            userId: row.userId,
+            starredAt: row.starredAt.toISOString(),
+            conversationId: row.conversationId,
+            messageId: row.messageId,
+            message: msg
+              ? {
+                  id: msg.id,
+                  conversationId: msg.conversationId,
+                  senderId: msg.senderId,
+                  body: msg.body,
+                  createdAt: msg.createdAt.toISOString(),
+                  editedAt: msg.editedAt ? msg.editedAt.toISOString() : null,
+                  deleted: msg.deleted,
+                }
+              : null,
+          };
+        })
+      );
+
+      return reply.status(200).send({
+        data,
+        hasMore,
+      });
     }
   );
 };

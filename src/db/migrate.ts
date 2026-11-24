@@ -97,8 +97,26 @@ export async function runMigrations(
         created_at      timestamp,
         edited_at       timestamp,
         deleted         boolean,
+        edit_count      int,
         PRIMARY KEY ((conversation_id), message_id)
       ) WITH CLUSTERING ORDER BY (message_id DESC)
+    `);
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".messages ADD edit_count int`);
+    } catch {
+      // Ignore if column already exists
+    }
+
+    // 3b. starred_messages table
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS "${keyspace}".starred_messages (
+        user_id         uuid,
+        starred_at      timestamp,
+        conversation_id uuid,
+        message_id      timeuuid,
+        PRIMARY KEY ((user_id), starred_at, message_id)
+      ) WITH CLUSTERING ORDER BY (starred_at DESC, message_id ASC)
     `);
 
     // 4. receipts table

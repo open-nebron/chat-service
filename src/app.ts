@@ -145,7 +145,8 @@ export async function buildApp(
 
   // Start Redis stream event consumer for nebron.events
   if (isRealRedis && cfg.REDIS_URL) {
-    const groupSuffix = cfg.NODE_ENV === 'test' ? `-${crypto.randomUUID().slice(0, 8)}` : '';
+    const isTest = cfg.NODE_ENV === 'test' || process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
+    const groupSuffix = isTest ? `-${crypto.randomUUID().slice(0, 8)}` : '';
     const eventConsumer = new RedisStreamEventConsumer({
       redisUrl: cfg.REDIS_URL,
       streamName: cfg.EVENTS_STREAM,

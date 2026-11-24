@@ -22,11 +22,13 @@ describe('WS and HTTP Block Enforcement', () => {
   let app: FastifyInstance;
   let redis: Redis;
 
-  const userA = 'baaaaaaa-1111-4111-8111-111111111111';
-  const userB = 'bbbbbbbb-2222-4222-8222-222222222222';
+  let userA: string;
+  let userB: string;
   let convId: string;
 
   beforeAll(async () => {
+    userA = 'ba' + crypto.randomUUID().slice(2);
+    userB = 'bb' + crypto.randomUUID().slice(2);
     mockCore = await startMockCoreServer();
     keyspaceContext = await setupTestKeyspace();
     const testApp = await createRealTestApp(keyspaceContext, { CORE_URL: mockCore.url });
@@ -92,7 +94,7 @@ describe('WS and HTTP Block Enforcement', () => {
     );
 
     // Wait for event consumer to process
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 40; i++) {
       const cached = await redis.get(`rel:${userB}:${userA}`);
       if (cached) break;
       await new Promise((r) => setTimeout(r, 50));
@@ -102,7 +104,8 @@ describe('WS and HTTP Block Enforcement', () => {
     wsB.on('message', (raw) => {
       try {
         const parsed = JSON.parse(raw.toString());
-        if (parsed.type === 'message.new') {
+        const msgConvId = parsed.payload?.message?.conversationId || parsed.payload?.conversationId;
+        if (parsed.type === 'message.new' && (!msgConvId || msgConvId === convId)) {
           bReceivedMessage = true;
         }
       } catch {}
