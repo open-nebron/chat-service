@@ -757,6 +757,7 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
           // Direct conversation
           items.push({
             id: uc.conversationId,
+            kind: 'direct',
             peerUserId: uc.otherUserId,
             lastMessage,
             unreadCount: uc.unreadCount,
