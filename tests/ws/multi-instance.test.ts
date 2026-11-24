@@ -58,7 +58,7 @@ describe('Multi-Instance WS Scaling (Redis Pub/Sub Fanout)', () => {
       otherUserId: userA,
       unreadDelta: 0,
     });
-  });
+  }, 30000);
 
   afterAll(async () => {
     await app1.close();

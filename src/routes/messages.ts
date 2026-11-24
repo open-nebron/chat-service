@@ -63,6 +63,21 @@ const getStarredQuerySchema = z
   })
   .strict();
 
+const reactionParamsSchema = z
+  .object({
+    id: z.string(),
+    messageId: z.string(),
+    emoji: z.string(),
+  })
+  .strict();
+
+const getReactionsParamsSchema = z
+  .object({
+    id: z.string(),
+    messageId: z.string(),
+  })
+  .strict();
+
 export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /conversations/:id/messages?limit=30&before=<messageId> (300/min)
   fastify.get(
@@ -130,6 +145,9 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
+      const msgIds = filteredMessages.map((m) => m.id);
+      const reactionsMap = await fastify.repos.reactions.batchLoadForMessages(id, msgIds);
+
       const formatted = filteredMessages.map((m) => ({
         id: m.id,
         conversationId: m.conversationId,
@@ -138,6 +156,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         createdAt: m.createdAt.toISOString(),
         editedAt: m.editedAt ? m.editedAt.toISOString() : null,
         deleted: m.deleted,
+        reactions: reactionsMap.get(m.id) || [],
       }));
 
       return reply.status(200).send({
@@ -772,6 +791,250 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(204).send();
+    }
+  );
+
+  // PUT /conversations/:id/messages/:messageId/reactions/:emoji (60/min)
+  fastify.put(
+    '/conversations/:id/messages/:messageId/reactions/:emoji',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = reactionParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id or message id', 400);
+      }
+
+      const emoji = decodeURIComponent(paramsResult.data.emoji).trim();
+      if (!emoji || emoji.length > 32) {
+        throw new AppError('invalid_payload', 'Invalid emoji parameter', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const msg = await fastify.repos.messages.getById(id, messageId);
+      if (!msg) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      if (msg.deleted) {
+        throw new AppError('message_deleted', 'Cannot react to a deleted message', 400);
+      }
+
+      const summaries = await fastify.repos.reactions.add(id, messageId, emoji, currentUserId);
+
+      const now = new Date();
+      const reactionPayload = {
+        conversationId: id,
+        messageId,
+        emoji,
+        userId: currentUserId,
+        createdAt: now.toISOString(),
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({
+            type: 'reaction.added',
+            payload: reactionPayload,
+          })
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing reaction.added to ws:conv');
+      }
+
+      for (const mId of conv.memberIds) {
+        try {
+          await fastify.redis.publish(
+            `ws:user:${mId}`,
+            JSON.stringify({
+              type: 'reaction.added',
+              payload: reactionPayload,
+            })
+          );
+        } catch {
+          // Ignore
+        }
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.message.reaction.added',
+          'payload',
+          JSON.stringify(reactionPayload)
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing chat.message.reaction.added to nebron.events');
+      }
+
+      return reply.status(200).send({ data: { reactions: summaries } });
+    }
+  );
+
+  // DELETE /conversations/:id/messages/:messageId/reactions/:emoji (60/min)
+  fastify.delete(
+    '/conversations/:id/messages/:messageId/reactions/:emoji',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = reactionParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id or message id', 400);
+      }
+
+      const emoji = decodeURIComponent(paramsResult.data.emoji).trim();
+      if (!emoji || emoji.length > 32) {
+        throw new AppError('invalid_payload', 'Invalid emoji parameter', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const msg = await fastify.repos.messages.getById(id, messageId);
+      if (!msg) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      if (msg.deleted) {
+        throw new AppError('message_deleted', 'Cannot delete reaction from a deleted message', 400);
+      }
+
+      const summaries = await fastify.repos.reactions.remove(id, messageId, emoji, currentUserId);
+
+      const reactionPayload = {
+        conversationId: id,
+        messageId,
+        emoji,
+        userId: currentUserId,
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({
+            type: 'reaction.removed',
+            payload: reactionPayload,
+          })
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing reaction.removed to ws:conv');
+      }
+
+      for (const mId of conv.memberIds) {
+        try {
+          await fastify.redis.publish(
+            `ws:user:${mId}`,
+            JSON.stringify({
+              type: 'reaction.removed',
+              payload: reactionPayload,
+            })
+          );
+        } catch {
+          // Ignore
+        }
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.message.reaction.removed',
+          'payload',
+          JSON.stringify(reactionPayload)
+        );
+      } catch (err: unknown) {
+        request.log.warn({ err: (err as Error).message }, 'Failed publishing chat.message.reaction.removed to nebron.events');
+      }
+
+      return reply.status(200).send({ data: { reactions: summaries } });
+    }
+  );
+
+  // GET /conversations/:id/messages/:messageId/reactions (120/min)
+  fastify.get(
+    '/conversations/:id/messages/:messageId/reactions',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 120,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = getReactionsParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id or message id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const msg = await fastify.repos.messages.getById(id, messageId);
+      if (!msg) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      const summaries = await fastify.repos.reactions.listForMessage(id, messageId, 50);
+
+      return reply.status(200).send({ data: { reactions: summaries } });
     }
   );
 

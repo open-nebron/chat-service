@@ -119,6 +119,18 @@ export async function runMigrations(
       ) WITH CLUSTERING ORDER BY (starred_at DESC, message_id ASC)
     `);
 
+    // 3c. message_reactions table
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS "${keyspace}".message_reactions (
+        conversation_id uuid,
+        message_id      timeuuid,
+        emoji           text,
+        user_id         uuid,
+        created_at      timestamp,
+        PRIMARY KEY ((conversation_id, message_id), emoji, user_id)
+      )
+    `);
+
     // 4. receipts table
     await client.execute(`
       CREATE TABLE IF NOT EXISTS "${keyspace}".receipts (

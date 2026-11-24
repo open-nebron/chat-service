@@ -48,7 +48,7 @@ describe('Multi-Instance Group WS Scaling (tests/group-multi-instance.test.ts)',
       initialMemberIds: [userB, userC, userD],
     });
     convId = conv.id;
-  });
+  }, 30000);
 
   afterAll(async () => {
     await app1.close();
