@@ -15,6 +15,7 @@ export interface Message {
   forwardedFromId?: string | null;
   forwardedFromSenderId?: string | null;
   forwardedFromConversationId?: string | null;
+  kind?: string | null;
 }
 
 export interface InsertMessageParams {
@@ -25,6 +26,7 @@ export interface InsertMessageParams {
   forwardedFromId?: string | null;
   forwardedFromSenderId?: string | null;
   forwardedFromConversationId?: string | null;
+  kind?: string | null;
 }
 
 export class MessagesRepository {
@@ -54,7 +56,7 @@ export class MessagesRepository {
     const fwdConvUuid = params.forwardedFromConversationId ? cassandra.types.Uuid.fromString(params.forwardedFromConversationId) : null;
 
     await this.client.execute(
-      'INSERT INTO messages (conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         cassandra.types.Uuid.fromString(params.conversationId),
         messageId,
@@ -68,6 +70,7 @@ export class MessagesRepository {
         fwdIdUuid,
         fwdSenderUuid,
         fwdConvUuid,
+        params.kind || null,
       ],
       { prepare: true }
     );
@@ -85,6 +88,7 @@ export class MessagesRepository {
       forwardedFromId: params.forwardedFromId || null,
       forwardedFromSenderId: params.forwardedFromSenderId || null,
       forwardedFromConversationId: params.forwardedFromConversationId || null,
+      kind: params.kind || null,
     };
   }
 
@@ -98,7 +102,7 @@ export class MessagesRepository {
 
     if (before) {
       query =
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id FROM messages WHERE conversation_id = ? AND message_id < ? LIMIT ?';
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id, kind FROM messages WHERE conversation_id = ? AND message_id < ? LIMIT ?';
       params = [
         cassandra.types.Uuid.fromString(conversationId),
         cassandra.types.TimeUuid.fromString(before),
@@ -106,7 +110,7 @@ export class MessagesRepository {
       ];
     } else {
       query =
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id FROM messages WHERE conversation_id = ? LIMIT ?';
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id, kind FROM messages WHERE conversation_id = ? LIMIT ?';
       params = [cassandra.types.Uuid.fromString(conversationId), limit];
     }
 
@@ -125,6 +129,7 @@ export class MessagesRepository {
       forwardedFromId: row.forwarded_from_id ? row.forwarded_from_id.toString() : null,
       forwardedFromSenderId: row.forwarded_from_sender_id ? fromCassandraUuid(row.forwarded_from_sender_id) : null,
       forwardedFromConversationId: row.forwarded_from_conversation_id ? row.forwarded_from_conversation_id.toString() : null,
+      kind: row.kind || null,
     }));
   }
 
@@ -133,7 +138,7 @@ export class MessagesRepository {
       const convUuid = cassandra.types.Uuid.fromString(conversationId);
       const msgUuid = cassandra.types.TimeUuid.fromString(messageId);
       const result = await this.client.execute(
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id FROM messages WHERE conversation_id = ? AND message_id = ?',
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id, kind FROM messages WHERE conversation_id = ? AND message_id = ?',
         [convUuid, msgUuid],
         { prepare: true }
       );
@@ -156,6 +161,7 @@ export class MessagesRepository {
         forwardedFromId: row.forwarded_from_id ? row.forwarded_from_id.toString() : null,
         forwardedFromSenderId: row.forwarded_from_sender_id ? fromCassandraUuid(row.forwarded_from_sender_id) : null,
         forwardedFromConversationId: row.forwarded_from_conversation_id ? row.forwarded_from_conversation_id.toString() : null,
+        kind: row.kind || null,
       };
     } catch {
       return null;

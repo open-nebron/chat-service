@@ -1571,4 +1571,29 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(200).send({ data: updatedConv });
     }
   );
+
+  // Internal endpoint for membership validation by other microservices (voice-service, etc.)
+  fastify.get(
+    '/internal/conversations/:id/members/:userId',
+    async (request, reply) => {
+      const token = request.headers['x-internal-token'];
+      if (!token || token !== fastify.config.INTERNAL_TOKEN) {
+        return reply.status(403).send({ error: { code: 'forbidden', message: 'Forbidden' } });
+      }
+      const { id, userId } = request.params as { id: string; userId: string };
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        return reply.status(404).send({ error: { code: 'not_found', message: 'Conversation not found' } });
+      }
+
+      const role = await fastify.repos.conversationMembers.getRole(id, userId);
+      const isMember = conv.kind === 'direct' ? conv.memberIds.includes(userId) : role !== null;
+
+      return reply.status(200).send({
+        isMember,
+        kind: conv.kind,
+        role: role || (isMember ? 'member' : undefined),
+      });
+    }
+  );
 };

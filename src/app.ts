@@ -164,6 +164,7 @@ export async function buildApp(
       streamName: cfg.EVENTS_STREAM,
       groupName: `${cfg.EVENTS_GROUP}${groupSuffix}`,
       subscriptionManager: app.subscriptionManager,
+      repos: app.repos,
       logger: app.log,
     });
     app.decorate('eventConsumer', eventConsumer);

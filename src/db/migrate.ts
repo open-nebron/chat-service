@@ -102,9 +102,16 @@ export async function runMigrations(
         forwarded_from_id timeuuid,
         forwarded_from_sender_id uuid,
         forwarded_from_conversation_id uuid,
+        kind            text,
         PRIMARY KEY ((conversation_id), message_id)
       ) WITH CLUSTERING ORDER BY (message_id DESC)
     `);
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".messages ADD kind text`);
+    } catch {
+      // Ignore if column already exists
+    }
 
     try {
       await client.execute(`ALTER TABLE "${keyspace}".messages ADD edit_count int`);

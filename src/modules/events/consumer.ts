@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { Redis } from 'ioredis';
 import { parseEvent } from '@nebron/contracts';
 import type { SubscriptionManager } from '../../ws/subscriptions.js';
+import type { Repositories } from '../../plugins/repos.js';
 
 export interface RedisStreamConsumerOptions {
   redisUrl: string;
@@ -10,6 +11,7 @@ export interface RedisStreamConsumerOptions {
   groupName?: string;
   consumerName?: string;
   subscriptionManager?: SubscriptionManager;
+  repos?: Repositories;
   logger?: any;
 }
 
@@ -22,6 +24,7 @@ export class RedisStreamEventConsumer {
   private readonly groupName: string;
   private readonly consumerName: string;
   private readonly subscriptionManager?: SubscriptionManager;
+  private readonly repos?: Repositories;
   private readonly logger?: any;
 
   constructor(options: RedisStreamConsumerOptions) {
@@ -31,6 +34,7 @@ export class RedisStreamEventConsumer {
     this.consumerName =
       options.consumerName || `${os.hostname()}-${crypto.randomUUID().slice(0, 8)}`;
     this.subscriptionManager = options.subscriptionManager;
+    this.repos = options.repos;
     this.logger = options.logger;
   }
 
@@ -329,6 +333,199 @@ export class RedisStreamEventConsumer {
 
         case 'chat.conversation.deleted': {
           // Conversation deleted: unsubscribe any connected local sockets
+          break;
+        }
+
+        case 'voice.call.group_started': {
+          const { callId, conversationId, hostId, roomName, mode, startedAt } = event.payload;
+          if (this.repos && this.redis) {
+            const messageBody = JSON.stringify({
+              callId,
+              roomName,
+              hostId,
+              mode: mode || 'audio',
+              startedAt,
+            });
+
+            const message = await this.repos.messages.insert({
+              conversationId,
+              senderId: hostId,
+              body: messageBody,
+              kind: 'call_invite',
+            });
+
+            // Store callId -> { conversationId, messageId } mapping for fast lookup when call ends
+            await this.redis.set(
+              `call_msg:${callId}`,
+              JSON.stringify({ conversationId, messageId: message.id }),
+              'EX',
+              86400
+            );
+
+            // Update user_conversations for members
+            try {
+              const conv = await this.repos.conversations.getById(conversationId);
+              const memberIds = conv ? conv.memberIds : [];
+              for (const memberId of memberIds) {
+                await this.repos.userConversations.upsert({
+                  userId: memberId,
+                  conversationId,
+                  lastMessageAt: message.createdAt,
+                  lastMessageId: message.id,
+                  lastMessageBody: 'Started a call',
+                  unreadDelta: memberId === hostId ? 0 : 1,
+                });
+              }
+            } catch (err: unknown) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              this.logWarn(`Failed updating user_conversations for call_invite: ${errMsg}`);
+            }
+
+            const formatted = {
+              id: message.id,
+              conversationId,
+              senderId: hostId,
+              body: message.body,
+              createdAt: message.createdAt.toISOString(),
+              editedAt: null,
+              deleted: false,
+              reactions: [],
+              kind: 'call_invite',
+            };
+
+            await this.redis.publish(
+              `ws:conv:${conversationId}`,
+              JSON.stringify({
+                type: 'message.new',
+                payload: {
+                  message: formatted,
+                  conversationId,
+                },
+              })
+            );
+          }
+          break;
+        }
+
+        case 'voice.call.participant_joined': {
+          const { callId, conversationId, userId, at } = event.payload;
+          if (this.redis) {
+            await this.redis.publish(
+              `ws:conv:${conversationId}`,
+              JSON.stringify({
+                type: 'call.participant_joined',
+                payload: {
+                  callId,
+                  conversationId,
+                  userId,
+                  joinedAt: at,
+                },
+              })
+            );
+          }
+          break;
+        }
+
+        case 'voice.call.participant_left': {
+          const { callId, conversationId, userId, at } = event.payload;
+          if (this.redis) {
+            await this.redis.publish(
+              `ws:conv:${conversationId}`,
+              JSON.stringify({
+                type: 'call.participant_left',
+                payload: {
+                  callId,
+                  conversationId,
+                  userId,
+                  leftAt: at,
+                },
+              })
+            );
+          }
+          break;
+        }
+
+        case 'voice.call.ended': {
+          const { callId, conversationId, endedBy, reason, at } = event.payload;
+          if (this.redis) {
+            let convId = conversationId;
+            let msgId: string | null = null;
+
+            const mappingRaw = await this.redis.get(`call_msg:${callId}`);
+            if (mappingRaw) {
+              try {
+                const mapping = JSON.parse(mappingRaw);
+                if (!convId) convId = mapping.conversationId;
+                msgId = mapping.messageId;
+              } catch {
+                // ignore
+              }
+            }
+
+            if (convId && msgId && this.repos) {
+              const existingMsg = await this.repos.messages.getById(convId, msgId);
+              if (existingMsg && existingMsg.kind === 'call_invite') {
+                let parsedBody: Record<string, unknown> = {};
+                try {
+                  parsedBody = JSON.parse(existingMsg.body);
+                } catch {
+                  parsedBody = { raw: existingMsg.body };
+                }
+                parsedBody.endedAt = at;
+                parsedBody.endReason = reason;
+                parsedBody.endedBy = endedBy;
+
+                const updatedBody = JSON.stringify(parsedBody);
+                const updatedMsg = await this.repos.messages.updateBody(
+                  convId,
+                  msgId,
+                  updatedBody,
+                  existingMsg.editCount || 0
+                );
+
+                const formatted = {
+                  id: updatedMsg.id,
+                  conversationId: convId,
+                  senderId: updatedMsg.senderId,
+                  body: updatedMsg.body,
+                  createdAt: updatedMsg.createdAt.toISOString(),
+                  editedAt: updatedMsg.editedAt ? updatedMsg.editedAt.toISOString() : null,
+                  deleted: updatedMsg.deleted,
+                  reactions: [],
+                  kind: 'call_invite',
+                };
+
+                await this.redis.publish(
+                  `ws:conv:${convId}`,
+                  JSON.stringify({
+                    type: 'message.edited',
+                    payload: {
+                      conversationId: convId,
+                      messageId: msgId,
+                      body: updatedBody,
+                      editedAt: at,
+                      message: formatted,
+                    },
+                  })
+                );
+              }
+            }
+
+            if (convId) {
+              await this.redis.publish(
+                `ws:conv:${convId}`,
+                JSON.stringify({
+                  type: 'call.ended',
+                  payload: {
+                    callId,
+                    conversationId: convId,
+                    endedBy,
+                    reason,
+                  },
+                })
+              );
+            }
+          }
           break;
         }
 

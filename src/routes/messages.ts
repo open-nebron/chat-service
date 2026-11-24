@@ -200,6 +200,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
               }
             : undefined,
           reactions: reactionsMap.get(m.id) || [],
+          kind: m.kind || undefined,
         };
       });
 
@@ -385,6 +386,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
               }
             : undefined,
           reactions: [],
+          kind: message.kind || undefined,
         };
 
         return reply.status(201).send({
@@ -510,6 +512,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
             }
           : undefined,
         reactions: [],
+        kind: message.kind || undefined,
       };
 
       try {
@@ -602,6 +605,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
             }
           : undefined,
         reactions,
+        kind: m.kind || undefined,
       };
 
       return reply.status(200).send({
@@ -847,6 +851,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         createdAt: updated.createdAt.toISOString(),
         editedAt: updated.editedAt ? updated.editedAt.toISOString() : null,
         deleted: updated.deleted,
+        kind: updated.kind || undefined,
       };
 
       const editPayload = {
