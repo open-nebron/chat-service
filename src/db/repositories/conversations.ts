@@ -278,6 +278,45 @@ export class ConversationsRepository {
     return matching;
   }
 
+  async listAllPendingRequests(): Promise<Conversation[]> {
+    let result: cassandra.types.ResultSet;
+    try {
+      result = await this.client.execute(
+        'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations WHERE request_state = ? ALLOW FILTERING',
+        ['pending'],
+        { prepare: true }
+      );
+    } catch {
+      result = await this.client.execute(
+        'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations ALLOW FILTERING'
+      );
+    }
+
+    const matching: Conversation[] = [];
+    for (const row of result.rows) {
+      if (row.request_state !== 'pending') continue;
+
+      const memberIds = Array.isArray(row.member_ids)
+        ? row.member_ids.map((m: any) => fromCassandraUuid(m))
+        : [];
+      const senderId = row.created_by ? fromCassandraUuid(row.created_by) : null;
+
+      matching.push({
+        id: row.id.toString(),
+        kind: row.kind,
+        createdAt: row.created_at,
+        createdBy: senderId,
+        name: row.name ?? null,
+        ownerId: row.owner_id ? fromCassandraUuid(row.owner_id) : null,
+        memberCount: row.member_count ?? memberIds.length,
+        memberIds,
+        requestState: 'pending',
+      });
+    }
+
+    return matching;
+  }
+
   async getById(id: string): Promise<Conversation | null> {
     const result = await this.client.execute(
       'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations WHERE id = ?',

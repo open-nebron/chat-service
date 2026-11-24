@@ -17,6 +17,7 @@ import { conversationsRoutes } from './routes/conversations.js';
 import { messagesRoutes } from './routes/messages.js';
 import { searchRoutes } from './routes/search.js';
 import { searchPlugin, type SearchPluginOptions } from './plugins/search.js';
+import { startRequestExpiryJob } from './jobs/request-expiry.js';
 import { AppError } from './lib/errors.js';
 
 declare module 'fastify' {
@@ -171,6 +172,15 @@ export async function buildApp(
     await eventConsumer.start();
     app.addHook('onClose', async () => {
       await eventConsumer.stop();
+    });
+  }
+
+  // Start background job for request expiry (non-test environments)
+  const isTestEnv = cfg.NODE_ENV === 'test' || process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
+  if (!isTestEnv) {
+    const expiryTimer = startRequestExpiryJob(app);
+    app.addHook('onClose', async () => {
+      clearInterval(expiryTimer);
     });
   }
 

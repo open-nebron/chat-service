@@ -1,4 +1,5 @@
 import type { Redis } from 'ioredis';
+import { getUserPrivacy } from '../lib/privacy.js';
 
 export interface PresencePayload {
   type: 'presence.update';
@@ -10,10 +11,14 @@ export interface PresencePayload {
 export class PresenceManager {
   private readonly redis: Redis;
   private readonly ttlSeconds: number;
+  private readonly coreUrl?: string;
+  private readonly internalToken?: string;
 
-  constructor(redis: Redis, ttlSeconds = 3600) {
+  constructor(redis: Redis, ttlSeconds = 3600, coreUrl?: string, internalToken?: string) {
     this.redis = redis;
     this.ttlSeconds = ttlSeconds;
+    this.coreUrl = coreUrl;
+    this.internalToken = internalToken;
   }
 
   public async onConnect(userId: string): Promise<number> {
@@ -46,11 +51,22 @@ export class PresenceManager {
     online: boolean,
     lastSeenAt?: string
   ): Promise<void> {
+    let effectiveLastSeenAt = lastSeenAt;
+    if (this.coreUrl && this.internalToken) {
+      const privacy = await getUserPrivacy(this.redis, this.coreUrl, this.internalToken, userId);
+      if (privacy.showOnlineStatus === 'nobody') {
+        return;
+      }
+      if (privacy.showLastSeen === 'nobody') {
+        effectiveLastSeenAt = undefined;
+      }
+    }
+
     const payload: PresencePayload = {
       type: 'presence.update',
       userId,
       online,
-      ...(lastSeenAt ? { lastSeenAt } : {}),
+      ...(effectiveLastSeenAt ? { lastSeenAt: effectiveLastSeenAt } : {}),
     };
 
     const message = JSON.stringify(payload);

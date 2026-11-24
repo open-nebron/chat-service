@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ExtendedWebSocket } from '../subscriptions.js';
 import { isPeerBlocked, filterGroupRecipients } from '../../lib/block-check.js';
 import { isValidUuid } from '../../lib/conversation-id.js';
+import { getUserPrivacy } from '../../lib/privacy.js';
 
 export interface MessageSendIn {
   type: 'message.send';
@@ -612,23 +613,34 @@ export async function handleMessageRead(
   }
 
   const readAt = new Date().toISOString();
-  await fastify.repos.receipts.upsert(conversationId, socket.userId, messageId);
-  await fastify.repos.userConversations.clearUnread(socket.userId, conversationId);
 
-  // Publish read event to conversation channel
-  await fastify.redis.publish(
-    `ws:conv:${conversationId}`,
-    JSON.stringify({
-      type: 'message.read',
-      payload: {
-        conversationId,
-        userId: socket.userId,
-        messageId,
-        readAt,
-      },
-      originSocketId: socket.id,
-    })
+  // Check reader's privacy setting for sendReadReceipts
+  const privacy = await getUserPrivacy(
+    fastify.redis,
+    fastify.config.CORE_URL,
+    fastify.config.INTERNAL_TOKEN,
+    socket.userId
   );
+
+  if (privacy.sendReadReceipts !== false) {
+    await fastify.repos.receipts.upsert(conversationId, socket.userId, messageId);
+    // Publish read event to conversation channel
+    await fastify.redis.publish(
+      `ws:conv:${conversationId}`,
+      JSON.stringify({
+        type: 'message.read',
+        payload: {
+          conversationId,
+          userId: socket.userId,
+          messageId,
+          readAt,
+        },
+        originSocketId: socket.id,
+      })
+    );
+  }
+
+  await fastify.repos.userConversations.clearUnread(socket.userId, conversationId);
 
   // Ack sender
   socket.send(

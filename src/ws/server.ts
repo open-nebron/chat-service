@@ -20,7 +20,9 @@ declare module 'fastify' {
 const plugin: FastifyPluginAsync = async (fastify) => {
   const presenceManager = new PresenceManager(
     fastify.redis,
-    fastify.config.PRESENCE_TTL_SECONDS || 3600
+    fastify.config.PRESENCE_TTL_SECONDS || 3600,
+    fastify.config.CORE_URL,
+    fastify.config.INTERNAL_TOKEN
   );
   const subscriptionManager = new SubscriptionManager(fastify.redis);
 

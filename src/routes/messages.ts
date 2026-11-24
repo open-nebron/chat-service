@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { isValidUuid } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
 import { isPeerBlocked, filterGroupRecipients, checkBlockStatus } from '../lib/block-check.js';
+import { getUserPrivacy } from '../lib/privacy.js';
 
 const getMessagesParamsSchema = z
   .object({
@@ -666,7 +667,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      await fastify.repos.receipts.upsert(id, currentUserId, messageId);
+      // Check reader's privacy setting for sendReadReceipts
+      const privacy = await getUserPrivacy(
+        fastify.redis,
+        fastify.config.CORE_URL,
+        fastify.config.INTERNAL_TOKEN,
+        currentUserId
+      );
+
+      if (privacy.sendReadReceipts !== false) {
+        await fastify.repos.receipts.upsert(id, currentUserId, messageId);
+      }
       await fastify.repos.userConversations.clearUnread(currentUserId, id);
 
       return reply.status(204).send();
