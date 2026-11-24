@@ -8,6 +8,8 @@ import {
 import { ConversationMembersRepository } from './conversation-members.js';
 import { UserConversationsRepository } from './user-conversations.js';
 
+export type RequestState = 'active' | 'pending' | 'rejected';
+
 export interface Conversation {
   id: string;
   kind: string; // 'direct' | 'group'
@@ -17,6 +19,7 @@ export interface Conversation {
   ownerId?: string | null;
   memberCount?: number;
   memberIds: string[];
+  requestState?: RequestState | null;
 }
 
 export interface CreateGroupParams {
@@ -37,7 +40,8 @@ export class ConversationsRepository {
   async createDirect(
     userA: string,
     userB: string,
-    createdBy?: string
+    createdBy?: string,
+    requestState: RequestState = 'active'
   ): Promise<Conversation> {
     const id = getDirectConversationId(userA, userB);
     const existing = await this.getById(id);
@@ -56,7 +60,7 @@ export class ConversationsRepository {
     ];
 
     await this.client.execute(
-      'INSERT INTO conversations (id, kind, created_at, created_by, owner_id, member_count, member_ids) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO conversations (id, kind, created_at, created_by, owner_id, member_count, member_ids, request_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [
         cassandra.types.Uuid.fromString(id),
         'direct',
@@ -65,6 +69,7 @@ export class ConversationsRepository {
         null,
         2,
         members,
+        requestState,
       ],
       { prepare: true }
     );
@@ -78,6 +83,7 @@ export class ConversationsRepository {
       ownerId: null,
       memberCount: 2,
       memberIds: [userA, userB],
+      requestState,
     };
   }
 
@@ -215,9 +221,66 @@ export class ConversationsRepository {
     );
   }
 
+  async updateRequestState(
+    conversationId: string,
+    requestState: RequestState
+  ): Promise<void> {
+    await this.client.execute(
+      'UPDATE conversations SET request_state = ? WHERE id = ?',
+      [requestState, cassandra.types.Uuid.fromString(conversationId)],
+      { prepare: true }
+    );
+  }
+
+  async listPendingRequestsForRecipient(recipientId: string): Promise<Conversation[]> {
+    let result: cassandra.types.ResultSet;
+    try {
+      result = await this.client.execute(
+        'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations WHERE request_state = ? ALLOW FILTERING',
+        ['pending'],
+        { prepare: true }
+      );
+    } catch {
+      result = await this.client.execute(
+        'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations ALLOW FILTERING'
+      );
+    }
+
+    const matching: Conversation[] = [];
+
+    for (const row of result.rows) {
+      if (row.kind !== 'direct') continue;
+      if (row.request_state !== 'pending') continue;
+
+      const memberIds = Array.isArray(row.member_ids)
+        ? row.member_ids.map((m: any) => fromCassandraUuid(m))
+        : [];
+      const senderId = row.created_by ? fromCassandraUuid(row.created_by) : null;
+
+      // Recipient must be a member, and must not be the sender
+      if (memberIds.includes(recipientId) && senderId !== recipientId) {
+        matching.push({
+          id: row.id.toString(),
+          kind: 'direct',
+          createdAt: row.created_at,
+          createdBy: senderId,
+          name: null,
+          ownerId: null,
+          memberCount: 2,
+          memberIds,
+          requestState: 'pending',
+        });
+      }
+    }
+
+    // Sort newest first
+    matching.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return matching;
+  }
+
   async getById(id: string): Promise<Conversation | null> {
     const result = await this.client.execute(
-      'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids FROM conversations WHERE id = ?',
+      'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations WHERE id = ?',
       [cassandra.types.Uuid.fromString(id)],
       { prepare: true }
     );
@@ -245,6 +308,7 @@ export class ConversationsRepository {
             ? 2
             : memberIds.length,
       memberIds,
+      requestState: (row.request_state as RequestState) ?? (row.kind === 'direct' ? 'active' : null),
     };
   }
 }

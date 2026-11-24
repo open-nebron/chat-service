@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { isValidUuid } from '../lib/conversation-id.js';
+import { isValidUuid, getDirectConversationId } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
+import { getMessageRequestPolicy } from '../lib/policy-check.js';
 
 function sanitizeGroupName(name: unknown): string {
   if (typeof name !== 'string') {
@@ -93,19 +94,109 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
+      const convId = getDirectConversationId(currentUserId, peerUserId);
+      const existingConv = await fastify.repos.conversations.getById(convId);
+
+      if (existingConv) {
+        if (existingConv.requestState === 'rejected') {
+          return reply.status(201).send({
+            data: {
+              id: existingConv.id,
+              kind: 'direct',
+              createdAt: existingConv.createdAt.toISOString(),
+              peerUserId,
+              request_state: 'rejected',
+              requestState: 'rejected',
+            },
+          });
+        }
+
+        return reply.status(200).send({
+          data: {
+            id: existingConv.id,
+            kind: 'direct',
+            createdAt: existingConv.createdAt.toISOString(),
+            peerUserId,
+            request_state: existingConv.requestState || 'active',
+            requestState: existingConv.requestState || 'active',
+          },
+        });
+      }
+
+      // New direct conversation: determine request_state based on recipient's policy
+      const policy = await getMessageRequestPolicy(
+        fastify.config.CORE_URL,
+        fastify.config.INTERNAL_TOKEN,
+        peerUserId,
+        request.log
+      );
+
+      let requestState: 'active' | 'pending' | 'rejected' = 'active';
+      if (policy === 'everyone') {
+        requestState = 'active';
+      } else if (policy === 'nobody') {
+        requestState = 'rejected';
+      } else {
+        // policy === 'known': since this is a new conversation (existingConv was null),
+        // they have no prior conversation -> pending
+        requestState = 'pending';
+      }
+
       const conv = await fastify.repos.conversations.createDirect(
         currentUserId,
         peerUserId,
-        currentUserId
+        currentUserId,
+        requestState
       );
 
-      // Seed user_conversations for both users if they don't already exist
+      if (requestState === 'pending') {
+        // Create conversation so sender sees it with Pending badge
+        // Do NOT add user_conversations row for recipient
+        // DO add user_conversations row for sender with is_pending = true
+        await fastify.repos.userConversations.upsert({
+          userId: currentUserId,
+          conversationId: conv.id,
+          lastMessageAt: conv.createdAt,
+          otherUserId: peerUserId,
+          unreadDelta: 0,
+          isPending: true,
+        });
+
+        return reply.status(200).send({
+          data: {
+            id: conv.id,
+            kind: 'direct',
+            createdAt: conv.createdAt.toISOString(),
+            peerUserId,
+            request_state: 'pending',
+            requestState: 'pending',
+          },
+        });
+      }
+
+      if (requestState === 'rejected') {
+        // return 201 with normal shape (sender has no idea)
+        // do NOT create user_conversations rows for either user
+        return reply.status(201).send({
+          data: {
+            id: conv.id,
+            kind: 'direct',
+            createdAt: conv.createdAt.toISOString(),
+            peerUserId,
+            request_state: 'rejected',
+            requestState: 'rejected',
+          },
+        });
+      }
+
+      // requestState === 'active'
       await fastify.repos.userConversations.upsert({
         userId: currentUserId,
         conversationId: conv.id,
         lastMessageAt: conv.createdAt,
         otherUserId: peerUserId,
         unreadDelta: 0,
+        isPending: false,
       });
 
       await fastify.repos.userConversations.upsert({
@@ -114,6 +205,7 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         lastMessageAt: conv.createdAt,
         otherUserId: currentUserId,
         unreadDelta: 0,
+        isPending: false,
       });
 
       return reply.status(200).send({
@@ -122,6 +214,8 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
           kind: 'direct',
           createdAt: conv.createdAt.toISOString(),
           peerUserId,
+          request_state: 'active',
+          requestState: 'active',
         },
       });
     }
@@ -704,8 +798,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
+      const currentUserId = request.user!.userId;
       const userConvs = await fastify.repos.userConversations.listForUser(
-        request.user!.userId,
+        currentUserId,
         limit,
         beforeDate
       );
@@ -717,6 +812,16 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         if (!conv) continue;
 
         if (kind !== 'all' && conv.kind !== kind) {
+          continue;
+        }
+
+        // Exclude rejected conversations
+        if (conv.requestState === 'rejected') {
+          continue;
+        }
+
+        // Exclude pending conversations where current user is the recipient (they go to /conversations/requests)
+        if (conv.requestState === 'pending' && currentUserId !== conv.createdBy) {
           continue;
         }
 
@@ -762,11 +867,266 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             lastMessage,
             unreadCount: uc.unreadCount,
             lastMessageAt: uc.lastMessageAt ? uc.lastMessageAt.toISOString() : null,
+            request_state: conv.requestState || 'active',
+            requestState: conv.requestState || 'active',
+            isPending: Boolean(uc.isPending),
           });
         }
       }
 
       return reply.status(200).send({ data: items });
+    }
+  );
+
+  // GET /conversations/requests (60/min)
+  fastify.get(
+    '/conversations/requests',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const currentUserId = request.user!.userId;
+      const pendingConvs = await fastify.repos.conversations.listPendingRequestsForRecipient(currentUserId);
+
+      const items: any[] = [];
+      for (const conv of pendingConvs) {
+        let lastMessage: {
+          id: string;
+          body: string;
+          senderId: string;
+          createdAt: string;
+        } | null = null;
+
+        const msgs = await fastify.repos.messages.listBefore(conv.id, undefined, 1);
+        if (msgs.length > 0 && msgs[0]) {
+          const msg = msgs[0];
+          lastMessage = {
+            id: msg.id,
+            body: msg.body,
+            senderId: msg.senderId,
+            createdAt: msg.createdAt.toISOString(),
+          };
+        }
+
+        items.push({
+          id: conv.id,
+          kind: 'direct',
+          senderId: conv.createdBy,
+          senderUsername: null,
+          senderAvatarUrl: null,
+          peerUserId: conv.createdBy,
+          lastMessage,
+          unreadCount: 0,
+          createdAt: conv.createdAt.toISOString(),
+          lastMessageAt: lastMessage ? lastMessage.createdAt : conv.createdAt.toISOString(),
+          request_state: 'pending',
+          requestState: 'pending',
+          isPending: true,
+        });
+      }
+
+      return reply.status(200).send({ data: items });
+    }
+  );
+
+  // POST /conversations/:id/accept-request
+  fastify.post(
+    '/conversations/:id/accept-request',
+    {
+      preHandler: fastify.authenticate,
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidUuid(id)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      if (conv.requestState !== 'pending') {
+        throw new AppError('invalid_request_state', 'Conversation is not a pending request', 400);
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId) || currentUserId === conv.createdBy) {
+        throw new ForbiddenError('forbidden', 'Only recipient can accept request');
+      }
+
+      // Update request_state = 'active'
+      await fastify.repos.conversations.updateRequestState(id, 'active');
+
+      // Update sender's user_conversations row is_pending = false
+      if (conv.createdBy) {
+        const senderUserConv = await fastify.repos.userConversations.getByUserAndConversation(
+          conv.createdBy,
+          id
+        );
+        if (senderUserConv) {
+          await fastify.repos.userConversations.upsert({
+            userId: conv.createdBy,
+            conversationId: id,
+            lastMessageId: senderUserConv.lastMessageId,
+            lastMessageAt: senderUserConv.lastMessageAt,
+            lastMessageBody: senderUserConv.lastMessageBody,
+            otherUserId: currentUserId,
+            unreadDelta: 0,
+            isPending: false,
+          });
+        }
+      }
+
+      // Fetch pending messages
+      const messages = await fastify.repos.messages.listBefore(id, undefined, 100);
+      const latestMsg = messages[0];
+
+      // Create user_conversations row for recipient
+      await fastify.repos.userConversations.upsert({
+        userId: currentUserId,
+        conversationId: id,
+        lastMessageId: latestMsg?.id ?? null,
+        lastMessageAt: latestMsg?.createdAt ?? conv.createdAt,
+        lastMessageBody: latestMsg?.body ?? null,
+        otherUserId: conv.createdBy,
+        unreadDelta: messages.length,
+        isPending: false,
+      });
+
+      // Fan out all pending messages to recipient via WS
+      const sortedMessages = [...messages].reverse();
+      for (const m of sortedMessages) {
+        const formatted = {
+          id: m.id,
+          conversationId: m.conversationId,
+          senderId: m.senderId,
+          body: m.body,
+          createdAt: m.createdAt.toISOString(),
+          editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+          deleted: m.deleted,
+        };
+
+        try {
+          await fastify.redis.publish(
+            `ws:user:${currentUserId}`,
+            JSON.stringify({
+              type: 'message.new',
+              payload: {
+                message: formatted,
+                senderId: m.senderId,
+              },
+            })
+          );
+        } catch (err: any) {
+          request.log.warn({ err: err.message }, 'Failed publishing pending message on accept');
+        }
+      }
+
+      // Notify recipient and sender WS of accept
+      const acceptPayload = {
+        conversationId: id,
+        acceptedBy: currentUserId,
+        at: new Date().toISOString(),
+      };
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({ type: 'conversation.request_accepted', payload: acceptPayload })
+        );
+        if (conv.createdBy) {
+          await fastify.redis.publish(
+            `ws:user:${conv.createdBy}`,
+            JSON.stringify({ type: 'conversation.request_accepted', payload: acceptPayload })
+          );
+        }
+      } catch (err: any) {
+        request.log.warn({ err: err.message }, 'Failed publishing ws notification on accept');
+      }
+
+      // Publish event chat.conversation.request_accepted to stream
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.conversation.request_accepted',
+          'payload',
+          JSON.stringify({
+            conversationId: id,
+            acceptedBy: currentUserId,
+            at: new Date().toISOString(),
+          })
+        );
+      } catch (err: any) {
+        request.log.warn({ err: err.message }, 'Failed publishing chat.conversation.request_accepted event');
+      }
+
+      const updated = await fastify.repos.conversations.getById(id);
+      return reply.status(200).send({
+        data: {
+          ...updated,
+          request_state: 'active',
+          requestState: 'active',
+        },
+      });
+    }
+  );
+
+  // POST /conversations/:id/reject-request
+  fastify.post(
+    '/conversations/:id/reject-request',
+    {
+      preHandler: fastify.authenticate,
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidUuid(id)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      if (conv.requestState !== 'pending') {
+        throw new AppError('invalid_request_state', 'Conversation is not a pending request', 400);
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId) || currentUserId === conv.createdBy) {
+        throw new ForbiddenError('forbidden', 'Only recipient can reject request');
+      }
+
+      // Update request_state = 'rejected'
+      await fastify.repos.conversations.updateRequestState(id, 'rejected');
+
+      // Publish event chat.conversation.request_rejected
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.conversation.request_rejected',
+          'payload',
+          JSON.stringify({
+            conversationId: id,
+            rejectedBy: currentUserId,
+            at: new Date().toISOString(),
+          })
+        );
+      } catch (err: any) {
+        request.log.warn({ err: err.message }, 'Failed publishing chat.conversation.request_rejected event');
+      }
+
+      return reply.status(204).send();
     }
   );
 };

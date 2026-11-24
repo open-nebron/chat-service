@@ -1,5 +1,6 @@
 import cassandra from 'cassandra-driver';
 import { toCassandraUuid, fromCassandraUuid } from '../../lib/conversation-id.js';
+import { ForbiddenError, NotFoundError } from '../../lib/errors.js';
 
 export interface Message {
   id: string; // string representation of timeuuid
@@ -110,16 +111,26 @@ export class MessagesRepository {
     };
   }
 
-  async softDelete(conversationId: string, messageId: string, _userId: string): Promise<void> {
-    const existing = await this.getById(conversationId, messageId);
-    if (!existing) {
-      return;
+  async softDelete(
+    conversationId: string,
+    messageId: string,
+    requesterId: string
+  ): Promise<void> {
+    const msg = await this.getById(conversationId, messageId);
+    if (!msg) {
+      throw new NotFoundError('message_not_found', 'Message not found');
+    }
+
+    if (msg.senderId !== requesterId) {
+      throw new ForbiddenError(
+        'not_message_owner',
+        'You can only delete your own messages'
+      );
     }
 
     await this.client.execute(
-      'UPDATE messages SET deleted = true, body = ? WHERE conversation_id = ? AND message_id = ?',
+      'UPDATE messages SET deleted = true WHERE conversation_id = ? AND message_id = ?',
       [
-        '',
         cassandra.types.Uuid.fromString(conversationId),
         cassandra.types.TimeUuid.fromString(messageId),
       ],

@@ -9,6 +9,7 @@ export interface UserConversation {
   lastMessageBody?: string | null;
   otherUserId?: string | null;
   unreadCount: number;
+  isPending?: boolean;
 }
 
 export interface UpsertUserConversationParams {
@@ -19,6 +20,7 @@ export interface UpsertUserConversationParams {
   lastMessageBody?: string | null;
   otherUserId?: string | null;
   unreadDelta?: number;
+  isPending?: boolean;
 }
 
 export class UserConversationsRepository {
@@ -33,7 +35,7 @@ export class UserConversationsRepository {
 
     // Fetch existing rows for this user partition
     const existing = await this.client.execute(
-      'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count FROM user_conversations WHERE user_id = ?',
+      'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count, is_pending FROM user_conversations WHERE user_id = ?',
       [userUuid],
       { prepare: true }
     );
@@ -63,12 +65,17 @@ export class UserConversationsRepository {
       unreadCount = Math.max(0, params.unreadDelta ?? 0);
     }
 
+    const isPending =
+      params.isPending !== undefined
+        ? params.isPending
+        : Boolean(existingRow?.is_pending);
+
     const lastMsgTimeUuid = params.lastMessageId
       ? cassandra.types.TimeUuid.fromString(params.lastMessageId)
       : null;
 
     await this.client.execute(
-      'INSERT INTO user_conversations (user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO user_conversations (user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count, is_pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [
         userUuid,
         convUuid,
@@ -77,6 +84,7 @@ export class UserConversationsRepository {
         params.lastMessageBody ?? null,
         otherUserUuid,
         unreadCount,
+        isPending,
       ],
       { prepare: true }
     );
@@ -93,11 +101,11 @@ export class UserConversationsRepository {
 
     if (before) {
       query =
-        'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count FROM user_conversations WHERE user_id = ? AND last_message_at < ? LIMIT ?';
+        'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count, is_pending FROM user_conversations WHERE user_id = ? AND last_message_at < ? LIMIT ?';
       params = [userUuid, before, limit];
     } else {
       query =
-        'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count FROM user_conversations WHERE user_id = ? LIMIT ?';
+        'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count, is_pending FROM user_conversations WHERE user_id = ? LIMIT ?';
       params = [userUuid, limit];
     }
 
@@ -111,6 +119,7 @@ export class UserConversationsRepository {
       lastMessageBody: row.last_message_body ?? null,
       otherUserId: row.other_user_id ? fromCassandraUuid(row.other_user_id) : null,
       unreadCount: row.unread_count ?? 0,
+      isPending: Boolean(row.is_pending),
     }));
   }
 
@@ -143,7 +152,7 @@ export class UserConversationsRepository {
   ): Promise<UserConversation | null> {
     const userUuid = toCassandraUuid(userId);
     const existing = await this.client.execute(
-      'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count FROM user_conversations WHERE user_id = ?',
+      'SELECT user_id, conversation_id, last_message_at, last_message_id, last_message_body, other_user_id, unread_count, is_pending FROM user_conversations WHERE user_id = ?',
       [userUuid],
       { prepare: true }
     );
@@ -162,6 +171,7 @@ export class UserConversationsRepository {
       lastMessageBody: row.last_message_body ?? null,
       otherUserId: row.other_user_id ? fromCassandraUuid(row.other_user_id) : null,
       unreadCount: row.unread_count ?? 0,
+      isPending: Boolean(row.is_pending),
     };
   }
 

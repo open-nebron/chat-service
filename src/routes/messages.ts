@@ -177,6 +177,52 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         throw new AppError('message_too_long', 'Message cannot exceed 4000 characters', 400);
       }
 
+      // Check request_state
+      if (conv.requestState === 'rejected') {
+        // do NOT store message, return 204 silent
+        return reply.status(204).send();
+      }
+
+      if (conv.requestState === 'pending') {
+        const message = await fastify.repos.messages.insert({
+          conversationId: id,
+          senderId: currentUserId,
+          body: sanitized,
+        });
+
+        const recipientId =
+          conv.memberIds.find((m) => m !== currentUserId) || null;
+
+        // Update sender's user_conversations normally (lastMessage etc.)
+        await fastify.repos.userConversations.upsert({
+          userId: currentUserId,
+          conversationId: id,
+          lastMessageId: message.id,
+          lastMessageAt: message.createdAt,
+          lastMessageBody: message.body,
+          otherUserId: recipientId,
+          unreadDelta: 0,
+          isPending: true,
+        });
+
+        // do NOT fan out to recipient's WS
+        // do NOT update recipient's user_conversations
+
+        const formatted = {
+          id: message.id,
+          conversationId: message.conversationId,
+          senderId: message.senderId,
+          body: message.body,
+          createdAt: message.createdAt.toISOString(),
+          editedAt: message.editedAt ? message.editedAt.toISOString() : null,
+          deleted: message.deleted,
+        };
+
+        return reply.status(201).send({
+          data: formatted,
+        });
+      }
+
       let permittedRecipients: string[] = [];
 
       if (conv.kind === 'group') {

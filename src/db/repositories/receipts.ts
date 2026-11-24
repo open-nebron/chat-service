@@ -77,4 +77,8 @@ export class ReceiptsRepository {
       lastReadAt: row.last_read_at,
     }));
   }
+
+  async getForConversation(conversationId: string): Promise<Receipt[]> {
+    return this.list(conversationId);
+  }
 }

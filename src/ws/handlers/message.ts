@@ -172,8 +172,75 @@ export async function handleMessageSend(
     }
   }
 
-  // Check idempotency if clientId provided
+  // Check request_state
   const idemKey = clientId ? `ws:msgidem:${socket.userId}:${clientId}` : null;
+
+  if (conv.requestState === 'rejected') {
+    // Ack sender with delivered: false, do NOT store
+    socket.send(
+      JSON.stringify({
+        type: 'message.sent',
+        payload: {
+          conversationId,
+          ...(clientId ? { clientId } : {}),
+          delivered: false,
+        },
+        ...(ackId !== undefined ? { ackId } : {}),
+      })
+    );
+    return;
+  }
+
+  if (conv.requestState === 'pending') {
+    const messageRecord = await fastify.repos.messages.insert({
+      conversationId,
+      senderId: socket.userId,
+      body: sanitized,
+    });
+
+    const recipientId = conv.memberIds.find((m) => m !== socket.userId) || null;
+
+    await fastify.repos.userConversations.upsert({
+      userId: socket.userId,
+      conversationId,
+      lastMessageId: messageRecord.id,
+      lastMessageAt: messageRecord.createdAt,
+      lastMessageBody: messageRecord.body,
+      otherUserId: recipientId,
+      unreadDelta: 0,
+      isPending: true,
+    });
+
+    if (idemKey) {
+      await fastify.redis.set(idemKey, messageRecord.id, 'EX', 300);
+    }
+
+    const formatted = {
+      id: messageRecord.id,
+      conversationId: messageRecord.conversationId,
+      senderId: messageRecord.senderId,
+      body: messageRecord.body,
+      createdAt: messageRecord.createdAt.toISOString(),
+      editedAt: messageRecord.editedAt ? messageRecord.editedAt.toISOString() : null,
+      deleted: messageRecord.deleted,
+    };
+
+    socket.send(
+      JSON.stringify({
+        type: 'message.sent',
+        payload: {
+          conversationId,
+          ...(clientId ? { clientId } : {}),
+          message: formatted,
+          delivered: true,
+        },
+        ...(ackId !== undefined ? { ackId } : {}),
+      })
+    );
+    return;
+  }
+
+  // Check idempotency if clientId provided
   if (idemKey) {
     const existingMsgId = await fastify.redis.get(idemKey);
     if (existingMsgId) {
