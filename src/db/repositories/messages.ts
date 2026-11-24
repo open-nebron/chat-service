@@ -11,12 +11,20 @@ export interface Message {
   editedAt?: Date | null;
   editCount?: number;
   deleted: boolean;
+  replyToId?: string | null;
+  forwardedFromId?: string | null;
+  forwardedFromSenderId?: string | null;
+  forwardedFromConversationId?: string | null;
 }
 
 export interface InsertMessageParams {
   conversationId: string;
   senderId: string;
   body: string;
+  replyToId?: string | null;
+  forwardedFromId?: string | null;
+  forwardedFromSenderId?: string | null;
+  forwardedFromConversationId?: string | null;
 }
 
 export class MessagesRepository {
@@ -26,8 +34,27 @@ export class MessagesRepository {
     const messageId = cassandra.types.TimeUuid.now();
     const now = new Date();
 
+    let replyUuid: cassandra.types.TimeUuid | null = null;
+    if (params.replyToId) {
+      try {
+        replyUuid = cassandra.types.TimeUuid.fromString(params.replyToId);
+      } catch {
+        replyUuid = null;
+      }
+    }
+    let fwdIdUuid: cassandra.types.TimeUuid | null = null;
+    if (params.forwardedFromId) {
+      try {
+        fwdIdUuid = cassandra.types.TimeUuid.fromString(params.forwardedFromId);
+      } catch {
+        fwdIdUuid = null;
+      }
+    }
+    const fwdSenderUuid = params.forwardedFromSenderId ? toCassandraUuid(params.forwardedFromSenderId) : null;
+    const fwdConvUuid = params.forwardedFromConversationId ? cassandra.types.Uuid.fromString(params.forwardedFromConversationId) : null;
+
     await this.client.execute(
-      'INSERT INTO messages (conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         cassandra.types.Uuid.fromString(params.conversationId),
         messageId,
@@ -37,6 +64,10 @@ export class MessagesRepository {
         null,
         false,
         0,
+        replyUuid,
+        fwdIdUuid,
+        fwdSenderUuid,
+        fwdConvUuid,
       ],
       { prepare: true }
     );
@@ -50,6 +81,10 @@ export class MessagesRepository {
       editedAt: null,
       editCount: 0,
       deleted: false,
+      replyToId: params.replyToId || null,
+      forwardedFromId: params.forwardedFromId || null,
+      forwardedFromSenderId: params.forwardedFromSenderId || null,
+      forwardedFromConversationId: params.forwardedFromConversationId || null,
     };
   }
 
@@ -59,11 +94,11 @@ export class MessagesRepository {
     limit: number = 30
   ): Promise<Message[]> {
     let query: string;
-    let params: any[];
+    let params: unknown[];
 
     if (before) {
       query =
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count FROM messages WHERE conversation_id = ? AND message_id < ? LIMIT ?';
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id FROM messages WHERE conversation_id = ? AND message_id < ? LIMIT ?';
       params = [
         cassandra.types.Uuid.fromString(conversationId),
         cassandra.types.TimeUuid.fromString(before),
@@ -71,7 +106,7 @@ export class MessagesRepository {
       ];
     } else {
       query =
-        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count FROM messages WHERE conversation_id = ? LIMIT ?';
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id FROM messages WHERE conversation_id = ? LIMIT ?';
       params = [cassandra.types.Uuid.fromString(conversationId), limit];
     }
 
@@ -86,34 +121,72 @@ export class MessagesRepository {
       editedAt: row.edited_at,
       editCount: row.edit_count ?? 0,
       deleted: row.deleted,
+      replyToId: row.reply_to_id ? row.reply_to_id.toString() : null,
+      forwardedFromId: row.forwarded_from_id ? row.forwarded_from_id.toString() : null,
+      forwardedFromSenderId: row.forwarded_from_sender_id ? fromCassandraUuid(row.forwarded_from_sender_id) : null,
+      forwardedFromConversationId: row.forwarded_from_conversation_id ? row.forwarded_from_conversation_id.toString() : null,
     }));
   }
 
   async getById(conversationId: string, messageId: string): Promise<Message | null> {
-    const result = await this.client.execute(
-      'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count FROM messages WHERE conversation_id = ? AND message_id = ?',
-      [
-        cassandra.types.Uuid.fromString(conversationId),
-        cassandra.types.TimeUuid.fromString(messageId),
-      ],
-      { prepare: true }
-    );
+    try {
+      const convUuid = cassandra.types.Uuid.fromString(conversationId);
+      const msgUuid = cassandra.types.TimeUuid.fromString(messageId);
+      const result = await this.client.execute(
+        'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted, edit_count, reply_to_id, forwarded_from_id, forwarded_from_sender_id, forwarded_from_conversation_id FROM messages WHERE conversation_id = ? AND message_id = ?',
+        [convUuid, msgUuid],
+        { prepare: true }
+      );
 
-    const row = result.first();
-    if (!row) {
+      const row = result.first();
+      if (!row) {
+        return null;
+      }
+
+      return {
+        id: row.message_id.toString(),
+        conversationId: row.conversation_id.toString(),
+        senderId: fromCassandraUuid(row.sender_id),
+        body: row.body,
+        createdAt: row.created_at,
+        editedAt: row.edited_at,
+        editCount: row.edit_count ?? 0,
+        deleted: row.deleted,
+        replyToId: row.reply_to_id ? row.reply_to_id.toString() : null,
+        forwardedFromId: row.forwarded_from_id ? row.forwarded_from_id.toString() : null,
+        forwardedFromSenderId: row.forwarded_from_sender_id ? fromCassandraUuid(row.forwarded_from_sender_id) : null,
+        forwardedFromConversationId: row.forwarded_from_conversation_id ? row.forwarded_from_conversation_id.toString() : null,
+      };
+    } catch {
       return null;
     }
+  }
 
-    return {
-      id: row.message_id.toString(),
-      conversationId: row.conversation_id.toString(),
-      senderId: fromCassandraUuid(row.sender_id),
-      body: row.body,
-      createdAt: row.created_at,
-      editedAt: row.edited_at,
-      editCount: row.edit_count ?? 0,
-      deleted: row.deleted,
-    };
+  async batchLoadPreviews(
+    conversationId: string,
+    messageIds: string[]
+  ): Promise<Map<string, { id: string; body: string; senderId: string; createdAt: Date; deleted: boolean }>> {
+    const map = new Map<string, { id: string; body: string; senderId: string; createdAt: Date; deleted: boolean }>();
+    if (messageIds.length === 0) return map;
+
+    const uniqueIds = Array.from(new Set(messageIds.filter(Boolean)));
+    const results = await Promise.all(
+      uniqueIds.map((id) => this.getById(conversationId, id))
+    );
+
+    for (const msg of results) {
+      if (msg) {
+        map.set(msg.id, {
+          id: msg.id,
+          body: msg.body,
+          senderId: msg.senderId,
+          createdAt: msg.createdAt,
+          deleted: msg.deleted,
+        });
+      }
+    }
+
+    return map;
   }
 
   async softDelete(

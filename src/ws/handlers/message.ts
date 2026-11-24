@@ -7,8 +7,14 @@ export interface MessageSendIn {
   type: 'message.send';
   payload: {
     conversationId: string;
-    body: string;
+    body?: string;
     clientId?: string;
+    replyToId?: string;
+    forwardOf?: {
+      messageId: string;
+      conversationId: string;
+      senderId?: string;
+    };
   };
   id?: string;
 }
@@ -41,7 +47,7 @@ export async function handleMessageSend(
     return;
   }
 
-  const { conversationId, body, clientId } = message.payload || {};
+  const { conversationId, body, clientId, replyToId, forwardOf } = message.payload || {};
 
   if (!conversationId || !isValidUuid(conversationId)) {
     socket.send(
@@ -66,7 +72,99 @@ export async function handleMessageSend(
     return;
   }
 
-  if (typeof body !== 'string' || body.includes('\u0000')) {
+  if (replyToId) {
+    if (!isValidUuid(replyToId)) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'invalid_uuid', message: 'Invalid replyToId' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    const replyTarget = await fastify.repos.messages.getById(conversationId, replyToId);
+    if (!replyTarget) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'reply_to_not_found', message: 'Reply target message not found in conversation' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    if (replyTarget.deleted) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'reply_to_deleted', message: 'Cannot reply to a deleted message' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+  }
+
+  let forwardSenderId: string | null = null;
+  if (forwardOf) {
+    if (!isValidUuid(forwardOf.conversationId) || !isValidUuid(forwardOf.messageId)) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'invalid_uuid', message: 'Invalid forwardOf conversationId or messageId' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    const srcConv = await fastify.repos.conversations.getById(forwardOf.conversationId);
+    if (!srcConv) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'conversation_not_found', message: 'Source conversation not found' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    if (!srcConv.memberIds.includes(socket.userId)) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'forward_source_inaccessible', message: 'Cannot forward message from inaccessible conversation' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    const srcMsg = await fastify.repos.messages.getById(forwardOf.conversationId, forwardOf.messageId);
+    if (!srcMsg) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'message_not_found', message: 'Source message to forward not found' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    if (srcMsg.deleted) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: 'forward_deleted_message', message: 'Cannot forward a deleted message' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+    forwardSenderId = forwardOf.senderId || srcMsg.senderId;
+  }
+
+  const rawBody = typeof body === 'string' ? body : '';
+  if (rawBody.includes('\u0000')) {
     socket.send(
       JSON.stringify({
         type: 'error',
@@ -78,12 +176,12 @@ export async function handleMessageSend(
   }
 
   // Strip control characters except newline and tab
-  const sanitized = body
+  const sanitized = rawBody
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .trim();
 
-  if (sanitized.length === 0) {
+  if (!forwardOf && sanitized.length === 0) {
     socket.send(
       JSON.stringify({
         type: 'error',
@@ -196,6 +294,10 @@ export async function handleMessageSend(
       conversationId,
       senderId: socket.userId,
       body: sanitized,
+      replyToId: replyToId || null,
+      forwardedFromId: forwardOf ? forwardOf.messageId : null,
+      forwardedFromSenderId: forwardOf ? forwardSenderId : null,
+      forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
     });
 
     const recipientId = conv.memberIds.find((m) => m !== socket.userId) || null;
@@ -215,6 +317,22 @@ export async function handleMessageSend(
       await fastify.redis.set(idemKey, messageRecord.id, 'EX', 300);
     }
 
+    let replyToPreview:
+      | { id: string; body: string; senderId: string; createdAt: string; deleted: boolean }
+      | undefined;
+    if (messageRecord.replyToId) {
+      const r = await fastify.repos.messages.getById(conversationId, messageRecord.replyToId);
+      if (r) {
+        replyToPreview = {
+          id: r.id,
+          body: r.body,
+          senderId: r.senderId,
+          createdAt: r.createdAt.toISOString(),
+          deleted: r.deleted,
+        };
+      }
+    }
+
     const formatted = {
       id: messageRecord.id,
       conversationId: messageRecord.conversationId,
@@ -223,6 +341,16 @@ export async function handleMessageSend(
       createdAt: messageRecord.createdAt.toISOString(),
       editedAt: messageRecord.editedAt ? messageRecord.editedAt.toISOString() : null,
       deleted: messageRecord.deleted,
+      replyToId: messageRecord.replyToId || undefined,
+      replyTo: replyToPreview,
+      forwardedFrom: messageRecord.forwardedFromSenderId
+        ? {
+            senderId: messageRecord.forwardedFromSenderId,
+            messageId: messageRecord.forwardedFromId || undefined,
+            conversationId: messageRecord.forwardedFromConversationId || undefined,
+          }
+        : undefined,
+      reactions: [],
     };
 
     socket.send(
@@ -246,6 +374,22 @@ export async function handleMessageSend(
     if (existingMsgId) {
       const existing = await fastify.repos.messages.getById(conversationId, existingMsgId);
       if (existing) {
+        let replyToPreview:
+          | { id: string; body: string; senderId: string; createdAt: string; deleted: boolean }
+          | undefined;
+        if (existing.replyToId) {
+          const r = await fastify.repos.messages.getById(conversationId, existing.replyToId);
+          if (r) {
+            replyToPreview = {
+              id: r.id,
+              body: r.body,
+              senderId: r.senderId,
+              createdAt: r.createdAt.toISOString(),
+              deleted: r.deleted,
+            };
+          }
+        }
+
         socket.send(
           JSON.stringify({
             type: 'message.sent',
@@ -260,6 +404,15 @@ export async function handleMessageSend(
                 createdAt: existing.createdAt.toISOString(),
                 editedAt: existing.editedAt ? existing.editedAt.toISOString() : null,
                 deleted: existing.deleted,
+                replyToId: existing.replyToId || undefined,
+                replyTo: replyToPreview,
+                forwardedFrom: existing.forwardedFromSenderId
+                  ? {
+                      senderId: existing.forwardedFromSenderId,
+                      messageId: existing.forwardedFromId || undefined,
+                      conversationId: existing.forwardedFromConversationId || undefined,
+                    }
+                  : undefined,
               },
               delivered: true,
             },
@@ -276,6 +429,10 @@ export async function handleMessageSend(
     conversationId,
     senderId: socket.userId,
     body: sanitized,
+    replyToId: replyToId || null,
+    forwardedFromId: forwardOf ? forwardOf.messageId : null,
+    forwardedFromSenderId: forwardOf ? forwardSenderId : null,
+    forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
   });
 
   // Update user_conversations for sender (unread unchanged)
@@ -307,6 +464,22 @@ export async function handleMessageSend(
     await fastify.redis.set(idemKey, messageRecord.id, 'EX', 300);
   }
 
+  let replyToPreview:
+    | { id: string; body: string; senderId: string; createdAt: string; deleted: boolean }
+    | undefined;
+  if (messageRecord.replyToId) {
+    const r = await fastify.repos.messages.getById(conversationId, messageRecord.replyToId);
+    if (r) {
+      replyToPreview = {
+        id: r.id,
+        body: r.body,
+        senderId: r.senderId,
+        createdAt: r.createdAt.toISOString(),
+        deleted: r.deleted,
+      };
+    }
+  }
+
   const formatted = {
     id: messageRecord.id,
     conversationId: messageRecord.conversationId,
@@ -315,6 +488,16 @@ export async function handleMessageSend(
     createdAt: messageRecord.createdAt.toISOString(),
     editedAt: messageRecord.editedAt ? messageRecord.editedAt.toISOString() : null,
     deleted: messageRecord.deleted,
+    replyToId: messageRecord.replyToId || undefined,
+    replyTo: replyToPreview,
+    forwardedFrom: messageRecord.forwardedFromSenderId
+      ? {
+          senderId: messageRecord.forwardedFromSenderId,
+          messageId: messageRecord.forwardedFromId || undefined,
+          conversationId: messageRecord.forwardedFromConversationId || undefined,
+        }
+      : undefined,
+    reactions: [],
   };
 
   // Publish to Redis channel ws:conv:{conversationId}

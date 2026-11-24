@@ -19,7 +19,22 @@ const getMessagesQuerySchema = z
 
 const postMessageBodySchema = z
   .object({
-    body: z.string(),
+    body: z.string().optional().default(''),
+    replyToId: z.string().optional(),
+    forwardOf: z
+      .object({
+        messageId: z.string(),
+        conversationId: z.string(),
+        senderId: z.string().optional(),
+      })
+      .optional(),
+  })
+  .strict();
+
+const getSingleMessageParamsSchema = z
+  .object({
+    id: z.string(),
+    messageId: z.string(),
   })
   .strict();
 
@@ -148,16 +163,45 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       const msgIds = filteredMessages.map((m) => m.id);
       const reactionsMap = await fastify.repos.reactions.batchLoadForMessages(id, msgIds);
 
-      const formatted = filteredMessages.map((m) => ({
-        id: m.id,
-        conversationId: m.conversationId,
-        senderId: m.senderId,
-        body: m.body,
-        createdAt: m.createdAt.toISOString(),
-        editedAt: m.editedAt ? m.editedAt.toISOString() : null,
-        deleted: m.deleted,
-        reactions: reactionsMap.get(m.id) || [],
-      }));
+      const replyToIds = Array.from(
+        new Set(
+          filteredMessages
+            .map((m) => m.replyToId)
+            .filter((rid): rid is string => Boolean(rid))
+        )
+      );
+      const replyPreviewsMap = await fastify.repos.messages.batchLoadPreviews(id, replyToIds);
+
+      const formatted = filteredMessages.map((m) => {
+        const replyPreview = m.replyToId ? replyPreviewsMap.get(m.replyToId) : undefined;
+        return {
+          id: m.id,
+          conversationId: m.conversationId,
+          senderId: m.senderId,
+          body: m.body,
+          createdAt: m.createdAt.toISOString(),
+          editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+          deleted: m.deleted,
+          replyToId: m.replyToId || undefined,
+          replyTo: replyPreview
+            ? {
+                id: replyPreview.id,
+                body: replyPreview.body,
+                senderId: replyPreview.senderId,
+                createdAt: replyPreview.createdAt.toISOString(),
+                deleted: replyPreview.deleted,
+              }
+            : undefined,
+          forwardedFrom: m.forwardedFromSenderId
+            ? {
+                senderId: m.forwardedFromSenderId,
+                messageId: m.forwardedFromId || undefined,
+                conversationId: m.forwardedFromConversationId || undefined,
+              }
+            : undefined,
+          reactions: reactionsMap.get(m.id) || [],
+        };
+      });
 
       return reply.status(200).send({
         data: formatted,
@@ -204,7 +248,44 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
-      const rawBody = bodyResult.data.body;
+      const rawBody = bodyResult.data.body || '';
+      const { replyToId, forwardOf } = bodyResult.data;
+
+      if (replyToId) {
+        if (!isValidUuid(replyToId)) {
+          throw new AppError('invalid_uuid', 'Invalid replyToId', 400);
+        }
+        const replyTarget = await fastify.repos.messages.getById(id, replyToId);
+        if (!replyTarget) {
+          throw new AppError('reply_to_not_found', 'Reply target message not found in conversation', 400);
+        }
+        if (replyTarget.deleted) {
+          throw new AppError('reply_to_deleted', 'Cannot reply to a deleted message', 400);
+        }
+      }
+
+      let forwardSenderId: string | null = null;
+      if (forwardOf) {
+        if (!isValidUuid(forwardOf.conversationId) || !isValidUuid(forwardOf.messageId)) {
+          throw new AppError('invalid_uuid', 'Invalid forwardOf conversationId or messageId', 400);
+        }
+        const srcConv = await fastify.repos.conversations.getById(forwardOf.conversationId);
+        if (!srcConv) {
+          throw new NotFoundError('conversation_not_found', 'Source conversation not found');
+        }
+        if (!srcConv.memberIds.includes(currentUserId)) {
+          throw new ForbiddenError('forward_source_inaccessible', 'Cannot forward message from inaccessible conversation');
+        }
+        const srcMsg = await fastify.repos.messages.getById(forwardOf.conversationId, forwardOf.messageId);
+        if (!srcMsg) {
+          throw new NotFoundError('message_not_found', 'Source message to forward not found');
+        }
+        if (srcMsg.deleted) {
+          throw new AppError('forward_deleted_message', 'Cannot forward a deleted message', 400);
+        }
+        forwardSenderId = forwardOf.senderId || srcMsg.senderId;
+      }
+
       if (rawBody.includes('\u0000')) {
         throw new AppError('invalid_payload', 'Message cannot contain null bytes', 400);
       }
@@ -215,7 +296,7 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
         .trim();
 
-      if (sanitized.length === 0) {
+      if (!forwardOf && sanitized.length === 0) {
         throw new AppError('empty_message', 'Message body cannot be empty', 400);
       }
 
@@ -234,6 +315,10 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
           conversationId: id,
           senderId: currentUserId,
           body: sanitized,
+          replyToId: replyToId || null,
+          forwardedFromId: forwardOf ? forwardOf.messageId : null,
+          forwardedFromSenderId: forwardOf ? forwardSenderId : null,
+          forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
         });
 
         const recipientId =
@@ -254,6 +339,22 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         // do NOT fan out to recipient's WS
         // do NOT update recipient's user_conversations
 
+        let replyToPreview:
+          | { id: string; body: string; senderId: string; createdAt: string; deleted: boolean }
+          | undefined;
+        if (message.replyToId) {
+          const r = await fastify.repos.messages.getById(id, message.replyToId);
+          if (r) {
+            replyToPreview = {
+              id: r.id,
+              body: r.body,
+              senderId: r.senderId,
+              createdAt: r.createdAt.toISOString(),
+              deleted: r.deleted,
+            };
+          }
+        }
+
         const formatted = {
           id: message.id,
           conversationId: message.conversationId,
@@ -262,6 +363,16 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
           createdAt: message.createdAt.toISOString(),
           editedAt: message.editedAt ? message.editedAt.toISOString() : null,
           deleted: message.deleted,
+          replyToId: message.replyToId || undefined,
+          replyTo: replyToPreview,
+          forwardedFrom: message.forwardedFromSenderId
+            ? {
+                senderId: message.forwardedFromSenderId,
+                messageId: message.forwardedFromId || undefined,
+                conversationId: message.forwardedFromConversationId || undefined,
+              }
+            : undefined,
+          reactions: [],
         };
 
         return reply.status(201).send({
@@ -311,6 +422,10 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         conversationId: id,
         senderId: currentUserId,
         body: sanitized,
+        replyToId: replyToId || null,
+        forwardedFromId: forwardOf ? forwardOf.messageId : null,
+        forwardedFromSenderId: forwardOf ? forwardSenderId : null,
+        forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
       });
 
       // Update user_conversations for sender (unread unchanged)
@@ -337,6 +452,22 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      let replyToPreview:
+        | { id: string; body: string; senderId: string; createdAt: string; deleted: boolean }
+        | undefined;
+      if (message.replyToId) {
+        const r = await fastify.repos.messages.getById(id, message.replyToId);
+        if (r) {
+          replyToPreview = {
+            id: r.id,
+            body: r.body,
+            senderId: r.senderId,
+            createdAt: r.createdAt.toISOString(),
+            deleted: r.deleted,
+          };
+        }
+      }
+
       const formatted = {
         id: message.id,
         conversationId: message.conversationId,
@@ -345,6 +476,16 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         createdAt: message.createdAt.toISOString(),
         editedAt: message.editedAt ? message.editedAt.toISOString() : null,
         deleted: message.deleted,
+        replyToId: message.replyToId || undefined,
+        replyTo: replyToPreview,
+        forwardedFrom: message.forwardedFromSenderId
+          ? {
+              senderId: message.forwardedFromSenderId,
+              messageId: message.forwardedFromId || undefined,
+              conversationId: message.forwardedFromConversationId || undefined,
+            }
+          : undefined,
+        reactions: [],
       };
 
       try {
@@ -363,6 +504,83 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(201).send({
+        data: formatted,
+      });
+    }
+  );
+
+  // GET /conversations/:id/messages/:messageId (60/min)
+  fastify.get(
+    '/conversations/:id/messages/:messageId',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const paramsResult = getSingleMessageParamsSchema.safeParse(request.params);
+      if (!paramsResult.success) {
+        throw new AppError('invalid_payload', paramsResult.error.message, 400);
+      }
+
+      const { id, messageId } = paramsResult.data;
+      if (!isValidUuid(id) || !isValidUuid(messageId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation or message id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      const currentUserId = request.user!.userId;
+      if (!conv || !conv.memberIds.includes(currentUserId)) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      const m = await fastify.repos.messages.getById(id, messageId);
+      if (!m) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+
+      const reactions = await fastify.repos.reactions.listForMessage(id, messageId);
+      let replyToPreview:
+        | { id: string; body: string; senderId: string; createdAt: string; deleted: boolean }
+        | undefined;
+      if (m.replyToId) {
+        const r = await fastify.repos.messages.getById(id, m.replyToId);
+        if (r) {
+          replyToPreview = {
+            id: r.id,
+            body: r.body,
+            senderId: r.senderId,
+            createdAt: r.createdAt.toISOString(),
+            deleted: r.deleted,
+          };
+        }
+      }
+
+      const formatted = {
+        id: m.id,
+        conversationId: m.conversationId,
+        senderId: m.senderId,
+        body: m.body,
+        createdAt: m.createdAt.toISOString(),
+        editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+        deleted: m.deleted,
+        replyToId: m.replyToId || undefined,
+        replyTo: replyToPreview,
+        forwardedFrom: m.forwardedFromSenderId
+          ? {
+              senderId: m.forwardedFromSenderId,
+              messageId: m.forwardedFromId || undefined,
+              conversationId: m.forwardedFromConversationId || undefined,
+            }
+          : undefined,
+        reactions,
+      };
+
+      return reply.status(200).send({
         data: formatted,
       });
     }

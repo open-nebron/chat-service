@@ -98,6 +98,10 @@ export async function runMigrations(
         edited_at       timestamp,
         deleted         boolean,
         edit_count      int,
+        reply_to_id     timeuuid,
+        forwarded_from_id timeuuid,
+        forwarded_from_sender_id uuid,
+        forwarded_from_conversation_id uuid,
         PRIMARY KEY ((conversation_id), message_id)
       ) WITH CLUSTERING ORDER BY (message_id DESC)
     `);
@@ -106,6 +110,30 @@ export async function runMigrations(
       await client.execute(`ALTER TABLE "${keyspace}".messages ADD edit_count int`);
     } catch {
       // Ignore if column already exists
+    }
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".messages ADD reply_to_id timeuuid`);
+    } catch {
+      // Ignore
+    }
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".messages ADD forwarded_from_id timeuuid`);
+    } catch {
+      // Ignore
+    }
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".messages ADD forwarded_from_sender_id uuid`);
+    } catch {
+      // Ignore
+    }
+
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".messages ADD forwarded_from_conversation_id uuid`);
+    } catch {
+      // Ignore
     }
 
     // 3b. starred_messages table
