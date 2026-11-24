@@ -428,6 +428,39 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
 
       await fastify.repos.messages.softDelete(id, messageId, currentUserId);
 
+      // Broadcast message.deleted to ws:conv channel and direct user channels
+      const deletePayload = {
+        conversationId: id,
+        messageId,
+        deletedBy: currentUserId,
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({
+            type: 'message.deleted',
+            payload: deletePayload,
+          })
+        );
+      } catch (err: any) {
+        request.log.warn({ err: err.message }, 'Failed publishing message.deleted to ws:conv');
+      }
+
+      for (const mId of conv.memberIds) {
+        try {
+          await fastify.redis.publish(
+            `ws:user:${mId}`,
+            JSON.stringify({
+              type: 'message.deleted',
+              payload: deletePayload,
+            })
+          );
+        } catch {
+          // Ignore
+        }
+      }
+
       return reply.status(204).send();
     }
   );

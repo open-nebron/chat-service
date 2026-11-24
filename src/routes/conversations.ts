@@ -840,7 +840,7 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
           if (msg) {
             lastMessage = {
               id: msg.id,
-              body: msg.body,
+              body: msg.deleted ? 'Message deleted' : msg.body,
               senderId: msg.senderId,
               createdAt: msg.createdAt.toISOString(),
             };
@@ -908,7 +908,7 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
           const msg = msgs[0];
           lastMessage = {
             id: msg.id,
-            body: msg.body,
+            body: msg.deleted ? 'Message deleted' : msg.body,
             senderId: msg.senderId,
             createdAt: msg.createdAt.toISOString(),
           };

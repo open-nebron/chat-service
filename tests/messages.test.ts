@@ -278,6 +278,14 @@ describe('Messages API and Repositories (Integration)', () => {
       expect(failRes.statusCode).toBe(403);
       expect(failRes.json().error.code).toBe('not_message_owner');
 
+      // Set up Redis subscriber to verify message.deleted event
+      const publishedMessages: any[] = [];
+      const subRedis = redis.duplicate();
+      await subRedis.subscribe(`ws:conv:${convId}`);
+      subRedis.on('message', (_channel, messageStr) => {
+        publishedMessages.push(JSON.parse(messageStr));
+      });
+
       // A deletes own message → 204
       const successRes = await app.inject({
         method: 'DELETE',
@@ -285,6 +293,14 @@ describe('Messages API and Repositories (Integration)', () => {
         headers: { authorization: `Bearer ${tokenA}` },
       });
       expect(successRes.statusCode).toBe(204);
+
+      await new Promise((r) => setTimeout(r, 100));
+      await subRedis.quit();
+
+      const deleteEvt = publishedMessages.find((m) => m.type === 'message.deleted');
+      expect(deleteEvt).toBeDefined();
+      expect(deleteEvt.payload.conversationId).toBe(convId);
+      expect(deleteEvt.payload.messageId).toBe(messageId);
 
       // Verify message is now soft-deleted (deleted=true)
       const getRes = await app.inject({
