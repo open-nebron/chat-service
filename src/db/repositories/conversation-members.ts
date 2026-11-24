@@ -1,4 +1,5 @@
 import cassandra from 'cassandra-driver';
+import { toCassandraUuid, fromCassandraUuid } from '../../lib/conversation-id.js';
 
 export interface ConversationMember {
   userId: string;
@@ -16,7 +17,7 @@ export class ConversationMembersRepository {
     joinedAt: Date = new Date()
   ): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const userUuid = toCassandraUuid(userId);
 
     const existingRole = await this.getRole(conversationId, userId);
     if (existingRole) {
@@ -32,7 +33,7 @@ export class ConversationMembersRepository {
 
   async remove(conversationId: string, userId: string): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const userUuid = toCassandraUuid(userId);
 
     const result = await this.client.execute(
       'SELECT joined_at, user_id FROM conversation_members WHERE conversation_id = ?',
@@ -40,7 +41,7 @@ export class ConversationMembersRepository {
       { prepare: true }
     );
 
-    const row = result.rows.find((r) => r.user_id.toString() === userId);
+    const row = result.rows.find((r) => fromCassandraUuid(r.user_id) === userId);
     if (row) {
       await this.client.execute(
         'DELETE FROM conversation_members WHERE conversation_id = ? AND joined_at = ? AND user_id = ?',
@@ -65,7 +66,7 @@ export class ConversationMembersRepository {
 
     // Filter by before date if provided
     let members = result.rows.map((row) => ({
-      userId: row.user_id.toString(),
+      userId: fromCassandraUuid(row.user_id),
       joinedAt: row.joined_at,
       role: (row.role as 'owner' | 'member') || 'member',
     }));
@@ -93,7 +94,7 @@ export class ConversationMembersRepository {
       { prepare: true }
     );
 
-    const row = result.rows.find((r) => r.user_id.toString() === userId);
+    const row = result.rows.find((r) => fromCassandraUuid(r.user_id) === userId);
     if (!row) {
       return null;
     }
@@ -123,7 +124,7 @@ export class ConversationMembersRepository {
     role: 'owner' | 'member'
   ): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const userUuid = toCassandraUuid(userId);
 
     const result = await this.client.execute(
       'SELECT joined_at, user_id FROM conversation_members WHERE conversation_id = ?',
@@ -131,7 +132,7 @@ export class ConversationMembersRepository {
       { prepare: true }
     );
 
-    const row = result.rows.find((r) => r.user_id.toString() === userId);
+    const row = result.rows.find((r) => fromCassandraUuid(r.user_id) === userId);
     if (row) {
       await this.client.execute(
         'UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND joined_at = ? AND user_id = ?',
@@ -139,14 +140,5 @@ export class ConversationMembersRepository {
         { prepare: true }
       );
     }
-  }
-
-  async removeAll(conversationId: string): Promise<void> {
-    const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    await this.client.execute(
-      'DELETE FROM conversation_members WHERE conversation_id = ?',
-      [convUuid],
-      { prepare: true }
-    );
   }
 }

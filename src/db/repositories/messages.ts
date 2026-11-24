@@ -1,5 +1,5 @@
 import cassandra from 'cassandra-driver';
-import { ForbiddenError, NotFoundError } from '../../lib/errors.js';
+import { toCassandraUuid, fromCassandraUuid } from '../../lib/conversation-id.js';
 
 export interface Message {
   id: string; // string representation of timeuuid
@@ -29,7 +29,7 @@ export class MessagesRepository {
       [
         cassandra.types.Uuid.fromString(params.conversationId),
         messageId,
-        cassandra.types.Uuid.fromString(params.senderId),
+        toCassandraUuid(params.senderId),
         params.body,
         now,
         null,
@@ -68,10 +68,7 @@ export class MessagesRepository {
     } else {
       query =
         'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted FROM messages WHERE conversation_id = ? LIMIT ?';
-      params = [
-        cassandra.types.Uuid.fromString(conversationId),
-        limit,
-      ];
+      params = [cassandra.types.Uuid.fromString(conversationId), limit];
     }
 
     const result = await this.client.execute(query, params, { prepare: true });
@@ -79,18 +76,15 @@ export class MessagesRepository {
     return result.rows.map((row) => ({
       id: row.message_id.toString(),
       conversationId: row.conversation_id.toString(),
-      senderId: row.sender_id.toString(),
+      senderId: fromCassandraUuid(row.sender_id),
       body: row.body,
       createdAt: row.created_at,
-      editedAt: row.edited_at ?? null,
-      deleted: Boolean(row.deleted),
+      editedAt: row.edited_at,
+      deleted: row.deleted,
     }));
   }
 
-  async getById(
-    conversationId: string,
-    messageId: string
-  ): Promise<Message | null> {
+  async getById(conversationId: string, messageId: string): Promise<Message | null> {
     const result = await this.client.execute(
       'SELECT conversation_id, message_id, sender_id, body, created_at, edited_at, deleted FROM messages WHERE conversation_id = ? AND message_id = ?',
       [
@@ -108,34 +102,24 @@ export class MessagesRepository {
     return {
       id: row.message_id.toString(),
       conversationId: row.conversation_id.toString(),
-      senderId: row.sender_id.toString(),
+      senderId: fromCassandraUuid(row.sender_id),
       body: row.body,
       createdAt: row.created_at,
-      editedAt: row.edited_at ?? null,
-      deleted: Boolean(row.deleted),
+      editedAt: row.edited_at,
+      deleted: row.deleted,
     };
   }
 
-  async softDelete(
-    conversationId: string,
-    messageId: string,
-    requesterId: string
-  ): Promise<void> {
-    const msg = await this.getById(conversationId, messageId);
-    if (!msg) {
-      throw new NotFoundError('message_not_found', 'Message not found');
-    }
-
-    if (msg.senderId !== requesterId) {
-      throw new ForbiddenError(
-        'not_message_owner',
-        'You can only delete your own messages'
-      );
+  async softDelete(conversationId: string, messageId: string, _userId: string): Promise<void> {
+    const existing = await this.getById(conversationId, messageId);
+    if (!existing) {
+      return;
     }
 
     await this.client.execute(
-      'UPDATE messages SET deleted = true WHERE conversation_id = ? AND message_id = ?',
+      'UPDATE messages SET deleted = true, body = ? WHERE conversation_id = ? AND message_id = ?',
       [
+        '',
         cassandra.types.Uuid.fromString(conversationId),
         cassandra.types.TimeUuid.fromString(messageId),
       ],

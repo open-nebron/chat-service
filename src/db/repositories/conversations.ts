@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import cassandra from 'cassandra-driver';
-import { getDirectConversationId } from '../../lib/conversation-id.js';
+import {
+  getDirectConversationId,
+  toCassandraUuid,
+  fromCassandraUuid,
+} from '../../lib/conversation-id.js';
 import { ConversationMembersRepository } from './conversation-members.js';
 import { UserConversationsRepository } from './user-conversations.js';
 
@@ -43,12 +47,12 @@ export class ConversationsRepository {
 
     const now = new Date();
     const creatorUuid = createdBy
-      ? cassandra.types.Uuid.fromString(createdBy)
-      : cassandra.types.Uuid.fromString(userA);
+      ? toCassandraUuid(createdBy)
+      : toCassandraUuid(userA);
 
     const members = [
-      cassandra.types.Uuid.fromString(userA),
-      cassandra.types.Uuid.fromString(userB),
+      toCassandraUuid(userA),
+      toCassandraUuid(userB),
     ];
 
     await this.client.execute(
@@ -80,7 +84,7 @@ export class ConversationsRepository {
   async createGroup(params: CreateGroupParams): Promise<Conversation> {
     const id = crypto.randomUUID();
     const now = new Date();
-    const ownerUuid = cassandra.types.Uuid.fromString(params.ownerId);
+    const ownerUuid = toCassandraUuid(params.ownerId);
 
     // Dedup all initial member IDs including owner
     const allMembersSet = new Set([params.ownerId, ...params.initialMemberIds]);
@@ -88,7 +92,7 @@ export class ConversationsRepository {
     const memberCount = allMemberIds.length;
 
     const membersUuids = allMemberIds.map((m) =>
-      cassandra.types.Uuid.fromString(m)
+      toCassandraUuid(m)
     );
 
     // 1. Insert conversations row
@@ -156,7 +160,7 @@ export class ConversationsRepository {
     await this.client.execute(
       'UPDATE conversations SET owner_id = ? WHERE id = ?',
       [
-        cassandra.types.Uuid.fromString(newOwnerId),
+        toCassandraUuid(newOwnerId),
         cassandra.types.Uuid.fromString(conversationId),
       ],
       { prepare: true }
@@ -182,7 +186,7 @@ export class ConversationsRepository {
 
   async addMemberId(conversationId: string, userId: string): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const userUuid = toCassandraUuid(userId);
 
     await this.client.execute(
       'UPDATE conversations SET member_ids = member_ids + ? WHERE id = ?',
@@ -193,7 +197,7 @@ export class ConversationsRepository {
 
   async removeMemberId(conversationId: string, userId: string): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const userUuid = toCassandraUuid(userId);
 
     await this.client.execute(
       'UPDATE conversations SET member_ids = member_ids - ? WHERE id = ?',
@@ -224,16 +228,16 @@ export class ConversationsRepository {
     }
 
     const memberIds = Array.isArray(row.member_ids)
-      ? row.member_ids.map((m: any) => m.toString())
+      ? row.member_ids.map((m: any) => fromCassandraUuid(m))
       : [];
 
     return {
       id: row.id.toString(),
       kind: row.kind,
       createdAt: row.created_at,
-      createdBy: row.created_by ? row.created_by.toString() : null,
+      createdBy: row.created_by ? fromCassandraUuid(row.created_by) : null,
       name: row.name ?? null,
-      ownerId: row.owner_id ? row.owner_id.toString() : null,
+      ownerId: row.owner_id ? fromCassandraUuid(row.owner_id) : null,
       memberCount:
         row.member_count !== undefined && row.member_count !== null
           ? Number(row.member_count)

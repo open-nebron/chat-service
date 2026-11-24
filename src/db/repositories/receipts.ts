@@ -1,4 +1,5 @@
 import cassandra from 'cassandra-driver';
+import { toCassandraUuid, fromCassandraUuid } from '../../lib/conversation-id.js';
 
 export interface Receipt {
   conversationId: string;
@@ -35,7 +36,7 @@ export class ReceiptsRepository {
     messageId: string
   ): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
-    const userUuid = cassandra.types.Uuid.fromString(userId);
+    const userUuid = toCassandraUuid(userId);
     const newReadId = cassandra.types.TimeUuid.fromString(messageId);
 
     // 1. Fetch current receipt
@@ -62,7 +63,7 @@ export class ReceiptsRepository {
     );
   }
 
-  async getForConversation(conversationId: string): Promise<Receipt[]> {
+  async list(conversationId: string): Promise<Receipt[]> {
     const result = await this.client.execute(
       'SELECT conversation_id, user_id, last_read_id, last_read_at FROM receipts WHERE conversation_id = ?',
       [cassandra.types.Uuid.fromString(conversationId)],
@@ -71,8 +72,8 @@ export class ReceiptsRepository {
 
     return result.rows.map((row) => ({
       conversationId: row.conversation_id.toString(),
-      userId: row.user_id.toString(),
-      lastReadId: row.last_read_id.toString(),
+      userId: fromCassandraUuid(row.user_id),
+      lastReadId: row.last_read_id ? row.last_read_id.toString() : '',
       lastReadAt: row.last_read_at,
     }));
   }

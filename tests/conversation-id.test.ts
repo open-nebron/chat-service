@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { version as uuidVersion, validate as uuidValidate } from 'uuid';
-import { getDirectConversationId, isValidUuid } from '../src/lib/conversation-id.js';
+import cassandra from 'cassandra-driver';
+import {
+  getDirectConversationId,
+  isValidUuid,
+  toCassandraUuid,
+  fromCassandraUuid,
+} from '../src/lib/conversation-id.js';
 
 describe('conversation-id (1:1 deterministic ID generator)', () => {
   const user1 = '11111111-1111-4111-8111-111111111111';
@@ -28,5 +34,26 @@ describe('conversation-id (1:1 deterministic ID generator)', () => {
     expect(isValidUuid(id)).toBe(true);
     expect(uuidValidate(id)).toBe(true);
     expect(uuidVersion(id)).toBe(5);
+  });
+
+  it('Supports 24-character hex MongoDB ObjectId seamlessly', () => {
+    const mongoObjectId = '6b05362ddd26fca126a41671';
+    expect(isValidUuid(mongoObjectId)).toBe(true);
+
+    const cassandraUuid = toCassandraUuid(mongoObjectId);
+    expect(cassandraUuid).toBeInstanceOf(cassandra.types.Uuid);
+    expect(cassandraUuid.toString()).toBe('00000000-6b05-362d-dd26-fca126a41671');
+
+    const restored = fromCassandraUuid(cassandraUuid);
+    expect(restored).toBe(mongoObjectId);
+  });
+
+  it('Preserves standard UUIDs without alteration', () => {
+    const standardUuid = '11111111-1111-4111-8111-111111111111';
+    const cassandraUuid = toCassandraUuid(standardUuid);
+    expect(cassandraUuid.toString()).toBe(standardUuid);
+
+    const restored = fromCassandraUuid(cassandraUuid);
+    expect(restored).toBe(standardUuid);
   });
 });
