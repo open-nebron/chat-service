@@ -4,7 +4,7 @@ import { toCassandraUuid, fromCassandraUuid } from '../../lib/conversation-id.js
 export interface ConversationMember {
   userId: string;
   joinedAt: Date;
-  role: 'owner' | 'member';
+  role: 'owner' | 'admin' | 'member';
 }
 
 export class ConversationMembersRepository {
@@ -13,7 +13,7 @@ export class ConversationMembersRepository {
   async add(
     conversationId: string,
     userId: string,
-    role: 'owner' | 'member',
+    role: 'owner' | 'admin' | 'member',
     joinedAt: Date = new Date()
   ): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
@@ -68,7 +68,7 @@ export class ConversationMembersRepository {
     let members = result.rows.map((row) => ({
       userId: fromCassandraUuid(row.user_id),
       joinedAt: row.joined_at,
-      role: (row.role as 'owner' | 'member') || 'member',
+      role: (row.role as 'owner' | 'admin' | 'member') || 'member',
     }));
 
     if (before) {
@@ -85,7 +85,7 @@ export class ConversationMembersRepository {
   async getRole(
     conversationId: string,
     userId: string
-  ): Promise<'owner' | 'member' | null> {
+  ): Promise<'owner' | 'admin' | 'member' | null> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
 
     const result = await this.client.execute(
@@ -99,7 +99,7 @@ export class ConversationMembersRepository {
       return null;
     }
 
-    return (row.role as 'owner' | 'member') || null;
+    return (row.role as 'owner' | 'admin' | 'member') || null;
   }
 
   async count(conversationId: string): Promise<number> {
@@ -121,7 +121,7 @@ export class ConversationMembersRepository {
   async updateRole(
     conversationId: string,
     userId: string,
-    role: 'owner' | 'member'
+    role: 'owner' | 'admin' | 'member'
   ): Promise<void> {
     const convUuid = cassandra.types.Uuid.fromString(conversationId);
     const userUuid = toCassandraUuid(userId);

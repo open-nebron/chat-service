@@ -1,9 +1,9 @@
 import type cassandra from 'cassandra-driver';
 
 export interface MigrationLogger {
-  info: (...args: any[]) => void;
-  warn?: (...args: any[]) => void;
-  error: (...args: any[]) => void;
+  info: (...args: unknown[]) => void;
+  warn?: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
 }
 
 /**
@@ -206,19 +206,41 @@ export async function runMigrations(
       // Ignore
     }
 
+    // 7. conversation_invites table
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS "${keyspace}".conversation_invites (
+        code              text,
+        conversation_id   uuid,
+        created_by        uuid,
+        created_at        timestamp,
+        expires_at        timestamp,
+        max_uses          int,
+        uses              int,
+        revoked_at        timestamp,
+        PRIMARY KEY ((code))
+      )
+    `);
+
+    try {
+      await client.execute(
+        `CREATE INDEX IF NOT EXISTS invites_by_conversation ON "${keyspace}".conversation_invites (conversation_id)`
+      );
+    } catch {
+      // Ignore if index already exists
+    }
+
     log.info('schema migrated');
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     if (process.env.NODE_ENV === 'test') {
       if ('warn' in log && typeof log.warn === 'function') {
-        log.warn(`[ScyllaDB] Migration skipped/mocked in test: ${err.message}`);
+        log.warn(`[ScyllaDB] Migration skipped/mocked in test: ${errorMsg}`);
       }
       return;
     }
 
     if ('error' in log && typeof log.error === 'function') {
-      log.error({ err }, `[ScyllaDB] Migration failed: ${err.message}`);
-    } else {
-      console.error(`[ScyllaDB] Migration failed: ${err.message}`);
+      log.error({ err }, `[ScyllaDB] Migration failed: ${errorMsg}`);
     }
     process.exit(1);
   }

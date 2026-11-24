@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import crypto from 'node:crypto';
 import { z } from 'zod';
 import { isValidUuid, getDirectConversationId } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
@@ -43,6 +44,19 @@ const addMembersSchema = z
 const renameGroupSchema = z
   .object({
     name: z.string(),
+  })
+  .strict();
+
+const updateMemberRoleSchema = z
+  .object({
+    role: z.enum(['admin', 'member']),
+  })
+  .strict();
+
+const createInviteSchema = z
+  .object({
+    expiresInHours: z.number().int().min(1).max(720).optional(),
+    maxUses: z.number().int().min(1).max(1000).optional(),
   })
   .strict();
 
@@ -294,8 +308,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
               },
             })
           );
-        } catch (err: any) {
-          request.log.warn({ err: err.message, memberId: mId }, 'Failed publishing conversation.created to ws:user');
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          request.log.warn({ err: errMsg, memberId: mId }, 'Failed publishing conversation.created to ws:user');
         }
       }
 
@@ -316,8 +331,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             createdAt: nowIso,
           })
         );
-      } catch (err: any) {
-        request.log.warn({ err: err.message }, 'Failed publishing chat.conversation.created to nebron.events');
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        request.log.warn({ err: errMsg }, 'Failed publishing chat.conversation.created to nebron.events');
       }
 
       return reply.status(201).send({
@@ -531,10 +547,21 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
 
       // Authorization paths:
       // a) userId === currentUserId -> leave group
-      // b) currentUserId === ownerId && userId !== currentUserId -> remove member
-      // c) member trying to remove someone else -> 403 not_owner
-      if (userId !== currentUserId && conv.ownerId !== currentUserId) {
-        throw new ForbiddenError('not_owner', 'Only the group owner can remove members');
+      // b) owner can remove anyone (admin or member)
+      // c) admin can remove members (not other admins or owner)
+      // d) regular member cannot remove anyone
+      if (userId !== currentUserId) {
+        const callerRole = await fastify.repos.conversationMembers.getRole(id, currentUserId);
+        if (callerRole === 'owner') {
+          // Owner can remove anyone
+        } else if (callerRole === 'admin') {
+          const targetRole = await fastify.repos.conversationMembers.getRole(id, userId);
+          if (targetRole === 'owner' || targetRole === 'admin') {
+            throw new ForbiddenError('cannot_remove_admin', 'Admins cannot remove other admins or the group owner');
+          }
+        } else {
+          throw new ForbiddenError('not_owner', 'Only the group owner or admins can remove members');
+        }
       }
 
       await fastify.repos.conversationMembers.remove(id, userId);
@@ -664,8 +691,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
-      if (conv.ownerId !== currentUserId) {
-        throw new ForbiddenError('not_owner', 'Only the group owner can rename the group');
+      const callerRole = await fastify.repos.conversationMembers.getRole(id, currentUserId);
+      if (callerRole !== 'owner' && callerRole !== 'admin') {
+        throw new ForbiddenError('not_owner', 'Only the group owner or admins can rename the group');
       }
 
       const sanitizedName = sanitizeGroupName(parseResult.data.name);
@@ -805,7 +833,7 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         beforeDate
       );
 
-      const items: any[] = [];
+      const items: Record<string, unknown>[] = [];
 
       for (const uc of userConvs) {
         const conv = await fastify.repos.conversations.getById(uc.conversationId);
@@ -894,7 +922,7 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
       const currentUserId = request.user!.userId;
       const pendingConvs = await fastify.repos.conversations.listPendingRequestsForRecipient(currentUserId);
 
-      const items: any[] = [];
+      const items: Record<string, unknown>[] = [];
       for (const conv of pendingConvs) {
         let lastMessage: {
           id: string;
@@ -1024,8 +1052,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
               },
             })
           );
-        } catch (err: any) {
-          request.log.warn({ err: err.message }, 'Failed publishing pending message on accept');
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          request.log.warn({ err: errMsg }, 'Failed publishing pending message on accept');
         }
       }
 
@@ -1046,8 +1075,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             JSON.stringify({ type: 'conversation.request_accepted', payload: acceptPayload })
           );
         }
-      } catch (err: any) {
-        request.log.warn({ err: err.message }, 'Failed publishing ws notification on accept');
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        request.log.warn({ err: errMsg }, 'Failed publishing ws notification on accept');
       }
 
       // Publish event chat.conversation.request_accepted to stream
@@ -1064,8 +1094,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             at: new Date().toISOString(),
           })
         );
-      } catch (err: any) {
-        request.log.warn({ err: err.message }, 'Failed publishing chat.conversation.request_accepted event');
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        request.log.warn({ err: errMsg }, 'Failed publishing chat.conversation.request_accepted event');
       }
 
       const updated = await fastify.repos.conversations.getById(id);
@@ -1122,11 +1153,422 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
             at: new Date().toISOString(),
           })
         );
-      } catch (err: any) {
-        request.log.warn({ err: err.message }, 'Failed publishing chat.conversation.request_rejected event');
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        request.log.warn({ err: errMsg }, 'Failed publishing chat.conversation.request_rejected event');
       }
 
       return reply.status(204).send();
+    }
+  );
+
+  // PATCH /conversations/:id/members/:userId/role (20/min)
+  fastify.patch(
+    '/conversations/:id/members/:userId/role',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 20,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id, userId } = request.params as { id: string; userId: string };
+      if (!isValidUuid(id) || !isValidUuid(userId)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation or user UUID', 400);
+      }
+
+      const parseResult = updateMemberRoleSchema.safeParse(request.body);
+      if (!parseResult.success) {
+        throw new AppError('invalid_payload', parseResult.error.message, 400);
+      }
+
+      const currentUserId = request.user!.userId;
+      if (userId === currentUserId) {
+        throw new AppError('cannot_demote_self', 'Owner cannot demote self', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      if (conv.kind !== 'group') {
+        throw new AppError('not_a_group', 'Conversation is not a group', 400);
+      }
+
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const callerRole = await fastify.repos.conversationMembers.getRole(id, currentUserId);
+      if (callerRole !== 'owner') {
+        throw new ForbiddenError('not_owner', 'Only the group owner can manage roles');
+      }
+
+      if (!conv.memberIds.includes(userId)) {
+        throw new AppError('not_a_member_of_group', 'User is not a member of this group', 400);
+      }
+
+      const oldRole = await fastify.repos.conversationMembers.getRole(id, userId);
+      if (!oldRole) {
+        throw new AppError('not_a_member_of_group', 'User is not a member of this group', 400);
+      }
+
+      const newRole = parseResult.data.role;
+      await fastify.repos.conversationMembers.updateRole(id, userId, newRole);
+
+      const nowIso = new Date().toISOString();
+      const roleChangedPayload = {
+        conversationId: id,
+        userId,
+        oldRole,
+        newRole,
+        changedBy: currentUserId,
+        at: nowIso,
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${id}`,
+          JSON.stringify({
+            type: 'conversation.role_changed',
+            payload: roleChangedPayload,
+          })
+        );
+      } catch {
+        // Ignore
+      }
+
+      try {
+        await fastify.redis.publish(
+          `ws:user:${userId}`,
+          JSON.stringify({
+            type: 'conversation.role_changed',
+            payload: roleChangedPayload,
+          })
+        );
+      } catch {
+        // Ignore
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.conversation.role_changed',
+          'payload',
+          JSON.stringify(roleChangedPayload)
+        );
+      } catch {
+        // Ignore
+      }
+
+      return reply.status(200).send({
+        data: {
+          conversationId: id,
+          userId,
+          role: newRole,
+        },
+      });
+    }
+  );
+
+  // POST /conversations/:id/invites (30/min)
+  fastify.post(
+    '/conversations/:id/invites',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidUuid(id)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id', 400);
+      }
+
+      const parseResult = createInviteSchema.safeParse(request.body || {});
+      if (!parseResult.success) {
+        throw new AppError('invalid_payload', parseResult.error.message, 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      if (conv.kind !== 'group') {
+        throw new AppError('not_a_group', 'Conversation is not a group', 400);
+      }
+
+      const currentUserId = request.user!.userId;
+      if (!conv.memberIds.includes(currentUserId)) {
+        throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
+      }
+
+      const callerRole = await fastify.repos.conversationMembers.getRole(id, currentUserId);
+      if (callerRole !== 'owner' && callerRole !== 'admin') {
+        throw new ForbiddenError('forbidden', 'Only owner or admins can create invites');
+      }
+
+      const { expiresInHours, maxUses } = parseResult.data;
+      const code = crypto.randomBytes(6).toString('base64url');
+      const expiresAt = expiresInHours ? new Date(Date.now() + expiresInHours * 3600 * 1000) : null;
+
+      await fastify.repos.conversationInvites.create({
+        code,
+        conversationId: id,
+        createdBy: currentUserId,
+        expiresAt,
+        maxUses: maxUses || null,
+      });
+
+      const expiresAtIso = expiresAt ? expiresAt.toISOString() : null;
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.conversation.invite_created',
+          'payload',
+          JSON.stringify({
+            conversationId: id,
+            code,
+            createdBy: currentUserId,
+            expiresAt: expiresAtIso,
+            maxUses: maxUses || null,
+          })
+        );
+      } catch {
+        // Ignore
+      }
+
+      return reply.status(201).send({
+        data: {
+          code,
+          url: `https://nebron.com/join/${code}`,
+          expiresAt: expiresAtIso,
+          maxUses: maxUses || null,
+        },
+      });
+    }
+  );
+
+  // DELETE /conversations/:id/invites/:code (30/min)
+  fastify.delete(
+    '/conversations/:id/invites/:code',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id, code } = request.params as { id: string; code: string };
+      if (!isValidUuid(id)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      const callerRole = await fastify.repos.conversationMembers.getRole(id, currentUserId);
+      if (callerRole !== 'owner' && callerRole !== 'admin') {
+        throw new ForbiddenError('forbidden', 'Only owner or admins can revoke invites');
+      }
+
+      const invite = await fastify.repos.conversationInvites.getByCode(code);
+      if (!invite || invite.conversationId !== id) {
+        throw new NotFoundError('invite_not_found', 'Invite code not found');
+      }
+
+      await fastify.repos.conversationInvites.revoke(code);
+      return reply.status(204).send();
+    }
+  );
+
+  // GET /conversations/:id/invites (60/min)
+  fastify.get(
+    '/conversations/:id/invites',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidUuid(id)) {
+        throw new AppError('invalid_uuid', 'Invalid conversation id', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(id);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      const callerRole = await fastify.repos.conversationMembers.getRole(id, currentUserId);
+      if (callerRole !== 'owner' && callerRole !== 'admin') {
+        throw new ForbiddenError('forbidden', 'Only owner or admins can list invites');
+      }
+
+      const invites = await fastify.repos.conversationInvites.listForConversation(id);
+      const now = new Date();
+      const active = invites.filter((inv) => {
+        if (inv.revokedAt) return false;
+        if (inv.expiresAt && inv.expiresAt < now) return false;
+        if (inv.maxUses !== null && inv.uses >= inv.maxUses) return false;
+        return true;
+      });
+
+      return reply.status(200).send({
+        data: active.map((inv) => ({
+          code: inv.code,
+          url: `https://nebron.com/join/${inv.code}`,
+          createdBy: inv.createdBy,
+          createdAt: inv.createdAt.toISOString(),
+          expiresAt: inv.expiresAt ? inv.expiresAt.toISOString() : null,
+          maxUses: inv.maxUses,
+          uses: inv.uses,
+        })),
+      });
+    }
+  );
+
+  // POST /conversations/join/:code (30/min)
+  fastify.post(
+    '/conversations/join/:code',
+    {
+      preHandler: fastify.authenticate,
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { code } = request.params as { code: string };
+      if (!code || typeof code !== 'string') {
+        throw new AppError('invalid_payload', 'Invalid invite code', 400);
+      }
+
+      const invite = await fastify.repos.conversationInvites.getByCode(code);
+      if (!invite) {
+        throw new NotFoundError('invite_not_found', 'Invite code not found');
+      }
+
+      if (invite.revokedAt) {
+        throw new AppError('invite_revoked', 'This invite link has been revoked', 400);
+      }
+
+      const now = new Date();
+      if (invite.expiresAt && invite.expiresAt < now) {
+        throw new AppError('invite_expired', 'This invite link has expired', 400);
+      }
+
+      if (invite.maxUses !== null && invite.uses >= invite.maxUses) {
+        throw new AppError('invite_exhausted', 'This invite link has reached its maximum uses', 400);
+      }
+
+      const conv = await fastify.repos.conversations.getById(invite.conversationId);
+      if (!conv) {
+        throw new NotFoundError('conversation_not_found', 'Conversation not found');
+      }
+
+      const currentUserId = request.user!.userId;
+      if (conv.memberIds.includes(currentUserId)) {
+        return reply.status(200).send({ data: conv });
+      }
+
+      if (conv.memberIds.length >= 100) {
+        throw new AppError('group_too_large', 'Group is full (max 100 members)', 400);
+      }
+
+      const joinTime = new Date();
+      await fastify.repos.conversationMembers.add(conv.id, currentUserId, 'member', joinTime);
+      await fastify.repos.userConversations.upsert({
+        userId: currentUserId,
+        conversationId: conv.id,
+        lastMessageAt: joinTime,
+        unreadDelta: 0,
+      });
+      await fastify.repos.conversations.addMemberId(conv.id, currentUserId);
+      await fastify.repos.conversations.incrementMemberCount(conv.id, 1);
+      await fastify.repos.conversationInvites.incrementUses(code);
+
+      const updatedConv = {
+        ...conv,
+        memberIds: [...conv.memberIds, currentUserId],
+        memberCount: (conv.memberCount ?? conv.memberIds.length) + 1,
+      };
+
+      const nowIso = joinTime.toISOString();
+      const memberJoinedPayload = {
+        conversationId: conv.id,
+        userId: currentUserId,
+        joinedVia: 'invite' as const,
+        code,
+        at: nowIso,
+      };
+
+      try {
+        await fastify.redis.publish(
+          `ws:conv:${conv.id}`,
+          JSON.stringify({
+            type: 'conversation.member_joined',
+            payload: memberJoinedPayload,
+          })
+        );
+      } catch {
+        // Ignore
+      }
+
+      try {
+        await fastify.redis.publish(
+          `ws:user:${currentUserId}`,
+          JSON.stringify({
+            type: 'conversation.member_joined',
+            payload: memberJoinedPayload,
+          })
+        );
+      } catch {
+        // Ignore
+      }
+
+      try {
+        await fastify.redis.xadd(
+          fastify.config.EVENTS_STREAM,
+          '*',
+          'type',
+          'chat.conversation.member_joined',
+          'payload',
+          JSON.stringify(memberJoinedPayload)
+        );
+      } catch {
+        // Ignore
+      }
+
+      return reply.status(200).send({ data: updatedConv });
     }
   );
 };

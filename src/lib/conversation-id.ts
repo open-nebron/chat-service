@@ -41,9 +41,9 @@ export function toCassandraUuid(id: string): cassandra.types.Uuid {
  * Converts a cassandra.types.Uuid or UUID string back to original string representation.
  * Un-pads '00000000-' to restore 24-character MongoDB ObjectIds.
  */
-export function fromCassandraUuid(val: any): string {
+export function fromCassandraUuid(val: unknown): string {
   if (!val) return '';
-  const str = val.toString();
+  const str = String(val);
   if (str.startsWith('00000000-')) {
     const raw = str.replace(/-/g, '').slice(8);
     if (/^[0-9a-fA-F]{24}$/.test(raw)) {

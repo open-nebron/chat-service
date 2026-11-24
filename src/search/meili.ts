@@ -83,7 +83,7 @@ export function createSearchService(options: CreateSearchServiceOptions): Search
             : message.createdAt.getTime();
 
         const index = client.index('messages');
-        await index.addDocuments([
+        const task = await index.addDocuments([
           {
             id: message.id,
             conversation_id: message.conversationId,
@@ -92,6 +92,9 @@ export function createSearchService(options: CreateSearchServiceOptions): Search
             created_at: createdAtNum,
           },
         ]);
+        if (process.env.NODE_ENV === 'test') {
+          await client.tasks.waitForTask(task.taskUid, { timeout: 5000 });
+        }
       } catch (err) {
         logger.warn({ err: (err as Error).message }, 'Failed to index message in Meilisearch');
       }
@@ -100,12 +103,15 @@ export function createSearchService(options: CreateSearchServiceOptions): Search
     async updateMessage(id: string, body: string): Promise<void> {
       try {
         const index = client.index('messages');
-        await index.updateDocuments([
+        const task = await index.updateDocuments([
           {
             id,
             body: body || '',
           },
         ]);
+        if (process.env.NODE_ENV === 'test') {
+          await client.tasks.waitForTask(task.taskUid, { timeout: 5000 });
+        }
       } catch (err) {
         logger.warn({ err: (err as Error).message }, 'Failed to update message in Meilisearch');
       }
@@ -114,7 +120,10 @@ export function createSearchService(options: CreateSearchServiceOptions): Search
     async deleteMessage(id: string): Promise<void> {
       try {
         const index = client.index('messages');
-        await index.deleteDocument(id);
+        const task = await index.deleteDocument(id);
+        if (process.env.NODE_ENV === 'test') {
+          await client.tasks.waitForTask(task.taskUid, { timeout: 5000 });
+        }
       } catch (err) {
         logger.warn({ err: (err as Error).message }, 'Failed to delete message from Meilisearch');
       }

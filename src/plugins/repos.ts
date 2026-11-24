@@ -7,6 +7,7 @@ import { ReceiptsRepository } from '../db/repositories/receipts.js';
 import { UserConversationsRepository } from '../db/repositories/user-conversations.js';
 import { StarredMessagesRepository } from '../db/repositories/starred-messages.js';
 import { ReactionsRepository } from '../db/repositories/reactions.js';
+import { ConversationInvitesRepository } from '../db/repositories/conversation-invites.js';
 
 export interface Repositories {
   conversations: ConversationsRepository;
@@ -16,6 +17,7 @@ export interface Repositories {
   userConversations: UserConversationsRepository;
   starredMessages: StarredMessagesRepository;
   reactions: ReactionsRepository;
+  conversationInvites: ConversationInvitesRepository;
 }
 
 declare module 'fastify' {
@@ -33,6 +35,7 @@ export const reposPlugin: FastifyPluginAsync = fp(async (fastify) => {
     userConversations: new UserConversationsRepository(fastify.scylla),
     starredMessages: new StarredMessagesRepository(fastify.scylla),
     reactions: new ReactionsRepository(fastify.scylla),
+    conversationInvites: new ConversationInvitesRepository(fastify.scylla),
   };
 
   fastify.decorate('repos', repos);
