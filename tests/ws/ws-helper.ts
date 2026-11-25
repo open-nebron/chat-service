@@ -129,6 +129,11 @@ export function startMockCoreServer(port = 0): Promise<MockCoreServer> {
       res.end(JSON.stringify({ data }));
       return;
     }
+    if (parsedUrl.pathname.startsWith('/internal/users/') && parsedUrl.pathname.endsWith('/ban-status')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ isBanned: false, bannedReason: null }));
+      return;
+    }
     res.writeHead(404);
     res.end();
   });

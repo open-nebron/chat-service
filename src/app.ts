@@ -16,6 +16,7 @@ import { healthRoutes } from './routes/health.js';
 import { conversationsRoutes } from './routes/conversations.js';
 import { messagesRoutes } from './routes/messages.js';
 import { searchRoutes } from './routes/search.js';
+import { internalRoutes } from './routes/internal.js';
 import { searchPlugin, type SearchPluginOptions } from './plugins/search.js';
 import { startRequestExpiryJob } from './jobs/request-expiry.js';
 import { AppError } from './lib/errors.js';
@@ -155,6 +156,7 @@ export async function buildApp(
   await app.register(conversationsRoutes);
   await app.register(messagesRoutes);
   await app.register(searchRoutes);
+  await app.register(internalRoutes);
 
   // Start Redis stream event consumer for nebron.events
   if (isRealRedis && cfg.REDIS_URL) {

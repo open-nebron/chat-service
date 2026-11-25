@@ -302,6 +302,15 @@ export async function handleMessageSend(
     });
 
     try {
+      const today = new Date().toISOString().slice(0, 10);
+      const key = `stats:messages:${today}`;
+      await fastify.redis.incr(key);
+      await fastify.redis.expire(key, 86400 * 7);
+    } catch {
+      // Ignore
+    }
+
+    try {
       await fastify.search.indexMessage({
         id: messageRecord.id,
         conversationId,
@@ -447,6 +456,15 @@ export async function handleMessageSend(
     forwardedFromSenderId: forwardOf ? forwardSenderId : null,
     forwardedFromConversationId: forwardOf ? forwardOf.conversationId : null,
   });
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const key = `stats:messages:${today}`;
+    await fastify.redis.incr(key);
+    await fastify.redis.expire(key, 86400 * 7);
+  } catch {
+    // Ignore
+  }
 
   try {
     await fastify.search.indexMessage({

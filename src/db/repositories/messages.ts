@@ -222,6 +222,17 @@ export class MessagesRepository {
     );
   }
 
+  async adminDelete(conversationId: string, messageId: string): Promise<void> {
+    await this.client.execute(
+      'UPDATE messages SET deleted = true WHERE conversation_id = ? AND message_id = ?',
+      [
+        cassandra.types.Uuid.fromString(conversationId),
+        cassandra.types.TimeUuid.fromString(messageId),
+      ],
+      { prepare: true }
+    );
+  }
+
   async updateBody(
     conversationId: string,
     messageId: string,

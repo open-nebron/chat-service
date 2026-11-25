@@ -185,6 +185,42 @@ export class RedisStreamEventConsumer {
           break;
         }
 
+        case 'core.user.banned': {
+          const { userId, reason } = event.payload;
+          await this.redis.set(
+            `user:banned:${userId}`,
+            JSON.stringify({ banned: true, reason }),
+            'EX',
+            86400
+          );
+
+          if (this.subscriptionManager) {
+            const sockets = this.subscriptionManager.getUserSockets(userId);
+            for (const socket of sockets) {
+              try {
+                socket.close(4403, 'banned');
+              } catch {
+                // Ignore
+              }
+            }
+
+            await this.redis.publish(
+              `ws:user:${userId}`,
+              JSON.stringify({
+                type: 'user.banned',
+                reason,
+              })
+            );
+          }
+          break;
+        }
+
+        case 'core.user.unbanned': {
+          const { userId } = event.payload;
+          await this.redis.del(`user:banned:${userId}`);
+          break;
+        }
+
         case 'core.profile.updated': {
           const { userId } = event.payload;
           // SET profile:{userId} '<json>' EX 3600

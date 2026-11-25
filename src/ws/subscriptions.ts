@@ -212,6 +212,15 @@ export class SubscriptionManager {
 
       // Dynamic group subscription management per-user
       if (channel.startsWith('ws:user:')) {
+        if (cleanPayload.type === 'user.banned') {
+          try {
+            socket.close(4403, 'banned');
+          } catch {
+            // Ignore
+          }
+          continue;
+        }
+
         const convId = cleanPayload.payload?.conversationId;
         if (convId) {
           if (

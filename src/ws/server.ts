@@ -6,6 +6,7 @@ import { SocketRateLimiter } from './rate-limit.js';
 import { PresenceManager } from './presence.js';
 import { SubscriptionManager, type ExtendedWebSocket } from './subscriptions.js';
 import { checkBlockStatus } from '../lib/block-check.js';
+import { checkUserBanned } from '../lib/ban-check.js';
 import { handlePing } from './handlers/ping.js';
 import { handleTyping } from './handlers/typing.js';
 import { handleMessageSend, handleMessageRead } from './handlers/message.js';
@@ -64,6 +65,18 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       }
     } catch (err: any) {
       fastify.log.warn({ err: err.message }, 'Failed checking revoked_sessions in Redis');
+    }
+
+    // 2b. Check user ban status
+    const banStatus = await checkUserBanned(
+      fastify.redis,
+      fastify.config.CORE_URL,
+      fastify.config.INTERNAL_TOKEN,
+      userId
+    );
+    if (banStatus.banned) {
+      rawSocket.close(4403, 'banned');
+      return;
     }
 
     // 3. Max concurrent connections check (close oldest if >= max)
