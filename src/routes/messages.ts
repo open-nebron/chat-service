@@ -4,6 +4,7 @@ import { isValidUuid } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
 import { isPeerBlocked, filterGroupRecipients, checkBlockStatus } from '../lib/block-check.js';
 import { getUserPrivacy } from '../lib/privacy.js';
+import { capture } from '../lib/analytics.js';
 
 const getMessagesParamsSchema = z
   .object({
@@ -399,6 +400,8 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
           kind: message.kind || undefined,
         };
 
+        capture(currentUserId, 'message_sent', { conversationId: id, messageId: message.id, type: message.kind || 'text' });
+
         return reply.status(201).send({
           data: formatted,
         });
@@ -548,6 +551,8 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err: unknown) {
         request.log.warn({ err: (err as Error).message }, 'Failed publishing new message to Redis');
       }
+
+      capture(currentUserId, 'message_sent', { conversationId: id, messageId: message.id, type: message.kind || 'text' });
 
       return reply.status(201).send({
         data: formatted,
@@ -787,6 +792,8 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
+      capture(currentUserId, 'message_deleted', { conversationId: id, messageId });
+
       return reply.status(204).send();
     }
   );
@@ -936,6 +943,8 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err: unknown) {
         request.log.warn({ err: (err as Error).message }, 'Failed publishing chat.message.edited to nebron.events');
       }
+
+      capture(currentUserId, 'message_edited', { conversationId: id, messageId });
 
       return reply.status(200).send({ data: formatted });
     }

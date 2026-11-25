@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { isValidUuid, getDirectConversationId } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
 import { getMessageRequestPolicy } from '../lib/policy-check.js';
+import { capture } from '../lib/analytics.js';
 
 function sanitizeGroupName(name: unknown): string {
   if (typeof name !== 'string') {
@@ -222,6 +223,8 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         isPending: false,
       });
 
+      capture(currentUserId, 'conversation_created', { conversationId: conv.id, type: 'direct' });
+
       return reply.status(200).send({
         data: {
           id: conv.id,
@@ -335,6 +338,9 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         const errMsg = err instanceof Error ? err.message : String(err);
         request.log.warn({ err: errMsg }, 'Failed publishing chat.conversation.created to nebron.events');
       }
+
+      capture(currentUserId, 'conversation_created', { conversationId: conv.id, type: 'group' });
+      capture(currentUserId, 'group_created', { conversationId: conv.id, memberCount: conv.memberCount });
 
       return reply.status(201).send({
         data: {
@@ -497,6 +503,10 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         );
       } catch {
         // Ignore
+      }
+
+      for (const mId of addedList) {
+        capture(currentUserId, 'group_member_added', { conversationId: id, memberId: mId });
       }
 
       return reply.status(200).send({

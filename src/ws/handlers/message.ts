@@ -3,6 +3,7 @@ import type { ExtendedWebSocket } from '../subscriptions.js';
 import { isPeerBlocked, filterGroupRecipients } from '../../lib/block-check.js';
 import { isValidUuid } from '../../lib/conversation-id.js';
 import { getUserPrivacy } from '../../lib/privacy.js';
+import { capture } from '../../lib/analytics.js';
 
 export interface MessageSendIn {
   type: 'message.send';
@@ -569,6 +570,12 @@ export async function handleMessageSend(
       ...(ackId !== undefined ? { ackId } : {}),
     })
   );
+
+  capture(socket.userId, 'message_sent', {
+    conversationId,
+    messageId: messageRecord.id,
+    type: messageRecord.kind || 'text',
+  });
 }
 
 export async function handleMessageRead(

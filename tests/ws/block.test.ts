@@ -81,7 +81,7 @@ describe('WS and HTTP Block Enforcement', () => {
 
     // Emit block event so connected sockets update blockedPeers
     await redis.xadd(
-      'nebron.events',
+      app.config.EVENTS_STREAM,
       '*',
       'type',
       'core.relationship.blocked',
@@ -163,7 +163,7 @@ describe('WS and HTTP Block Enforcement', () => {
 
     // Emit unblock event
     await redis.xadd(
-      'nebron.events',
+      app.config.EVENTS_STREAM,
       '*',
       'type',
       'core.relationship.unblocked',
@@ -221,7 +221,7 @@ describe('WS and HTTP Block Enforcement', () => {
 
     // Emit block event
     await redis.xadd(
-      'nebron.events',
+      app.config.EVENTS_STREAM,
       '*',
       'type',
       'core.relationship.blocked',

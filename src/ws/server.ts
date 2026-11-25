@@ -109,6 +109,14 @@ const plugin: FastifyPluginAsync = async (fastify) => {
     });
     socket.typingTimers = new Map();
 
+    if (sessionId && sessionId !== 'session-default') {
+      try {
+        await fastify.redis.set(`session:last_active:${sessionId}`, new Date().toISOString(), 'EX', 86400);
+      } catch (err: any) {
+        fastify.log.warn({ err: err.message }, 'Failed updating session:last_active in Redis');
+      }
+    }
+
     subscriptionManager.registerUserSocket(socket);
 
     let convIds: string[] = [];

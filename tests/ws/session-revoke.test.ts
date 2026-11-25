@@ -51,7 +51,7 @@ describe('WS Session Revocation', () => {
 
     // Publish session revoked event on nebron.events stream
     await redis.xadd(
-      'nebron.events',
+      app.config.EVENTS_STREAM,
       '*',
       'type',
       'auth.session.revoked',

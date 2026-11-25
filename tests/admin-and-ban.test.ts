@@ -75,7 +75,7 @@ describe('Admin and Ban Enforcement', () => {
 
     // Publish core.user.banned event on nebron.events stream
     await redis.xadd(
-      'nebron.events',
+      app.config.EVENTS_STREAM,
       '*',
       'type',
       'core.user.banned',

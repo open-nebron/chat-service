@@ -40,6 +40,9 @@ describe('WS Connect & Auth Handshake', () => {
     expect(msg.payload.sessionId).toBe('sess-1');
     expect(msg.payload.limits.messagesPerSec).toBeDefined();
 
+    const lastActive = await redis.get('session:last_active:sess-1');
+    expect(lastActive).toBeDefined();
+
     ws.close();
   });
 

@@ -202,7 +202,7 @@ describe('WS message.read and typing indicators', () => {
     mockCore.setRelationship(userBlockedB, { blocked: true });
 
     await redis.xadd(
-      'nebron.events',
+      app.config.EVENTS_STREAM,
       '*',
       'type',
       'core.relationship.blocked',
