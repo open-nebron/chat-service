@@ -1,4 +1,13 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { z } from 'zod';
+
+const createChannelBodySchema = z
+  .object({
+    spaceId: z.string().min(1),
+    channelId: z.string().min(1),
+    name: z.string().min(1).max(100),
+  })
+  .strict();
 
 export const internalRoutes: FastifyPluginAsync = async (fastify) => {
   // Middleware to check INTERNAL_TOKEN on all /internal/* routes in this plugin
@@ -79,4 +88,20 @@ export const internalRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(200).send({ success: true });
     }
   );
+
+  // POST /internal/channels - create Scylla conversation for a Space text channel
+  fastify.post('/internal/channels', async (request, reply) => {
+    const parsed = createChannelBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: 'invalid_payload', message: parsed.error.message },
+      });
+    }
+
+    const conv = await fastify.repos.conversations.createChannelConversation(parsed.data);
+    return reply.status(201).send({
+      conversationId: conv.id,
+      data: conv,
+    });
+  });
 };

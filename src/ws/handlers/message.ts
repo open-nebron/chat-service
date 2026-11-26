@@ -3,6 +3,7 @@ import type { ExtendedWebSocket } from '../subscriptions.js';
 import { isPeerBlocked, filterGroupRecipients } from '../../lib/block-check.js';
 import { isValidUuid } from '../../lib/conversation-id.js';
 import { getUserPrivacy } from '../../lib/privacy.js';
+import { ChannelChecks, checkChannelAccess } from '../../lib/space-permissions.js';
 import { capture } from '../../lib/analytics.js';
 
 export interface MessageSendIn {
@@ -63,7 +64,39 @@ export async function handleMessageSend(
   }
 
   const conv = await fastify.repos.conversations.getById(conversationId);
-  if (!conv || !conv.memberIds.includes(socket.userId)) {
+  if (!conv) {
+    socket.send(
+      JSON.stringify({
+        type: 'error',
+        payload: { code: 'not_a_member', message: 'User is not a member of this conversation' },
+        ...(ackId !== undefined ? { ackId } : {}),
+      })
+    );
+    return;
+  }
+
+  if (conv.kind === 'channel') {
+    try {
+      await checkChannelAccess(
+        fastify.redis,
+        fastify.config.SPACES_URL,
+        fastify.config.INTERNAL_TOKEN,
+        conv,
+        socket.userId,
+        ChannelChecks.send,
+        fastify.log
+      );
+    } catch (err: any) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: err?.code || 'missing_permission', message: err?.message || 'Missing channel send permission' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+  } else if (!conv.memberIds.includes(socket.userId)) {
     socket.send(
       JSON.stringify({
         type: 'error',
@@ -131,7 +164,28 @@ export async function handleMessageSend(
       );
       return;
     }
-    if (!srcConv.memberIds.includes(socket.userId)) {
+    if (srcConv.kind === 'channel') {
+      try {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          srcConv,
+          socket.userId,
+          ChannelChecks.viewAndHistory,
+          fastify.log
+        );
+      } catch {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            payload: { code: 'forward_source_inaccessible', message: 'Cannot forward message from inaccessible conversation' },
+            ...(ackId !== undefined ? { ackId } : {}),
+          })
+        );
+        return;
+      }
+    } else if (!srcConv.memberIds.includes(socket.userId)) {
       socket.send(
         JSON.stringify({
           type: 'error',
@@ -208,7 +262,9 @@ export async function handleMessageSend(
   // Determine recipients and check block state
   let permittedRecipients: string[] = [];
 
-  if (conv.kind === 'group') {
+  if (conv.kind === 'channel') {
+    permittedRecipients = [];
+  } else if (conv.kind === 'group') {
     const filterRes = await filterGroupRecipients(
       fastify.redis,
       fastify.config.CORE_URL,
@@ -479,28 +535,30 @@ export async function handleMessageSend(
     fastify.log.warn({ err: (err as Error).message }, 'Failed to index message in search');
   }
 
-  // Update user_conversations for sender (unread unchanged)
-  await fastify.repos.userConversations.upsert({
-    userId: socket.userId,
-    conversationId,
-    lastMessageId: messageRecord.id,
-    lastMessageAt: messageRecord.createdAt,
-    lastMessageBody: messageRecord.body,
-    otherUserId: conv.kind === 'direct' ? (permittedRecipients[0] || null) : null,
-    unreadDelta: 0,
-  });
-
-  // Update user_conversations for permitted recipients (unread +1)
-  for (const recId of permittedRecipients) {
+  // Update user_conversations for sender & recipients (skip DM inbox updates for space channels)
+  if (conv.kind !== 'channel') {
     await fastify.repos.userConversations.upsert({
-      userId: recId,
+      userId: socket.userId,
       conversationId,
       lastMessageId: messageRecord.id,
       lastMessageAt: messageRecord.createdAt,
       lastMessageBody: messageRecord.body,
-      otherUserId: conv.kind === 'direct' ? socket.userId : null,
-      unreadDelta: 1,
+      otherUserId: conv.kind === 'direct' ? (permittedRecipients[0] || null) : null,
+      unreadDelta: 0,
     });
+
+    // Update user_conversations for permitted recipients (unread +1)
+    for (const recId of permittedRecipients) {
+      await fastify.repos.userConversations.upsert({
+        userId: recId,
+        conversationId,
+        lastMessageId: messageRecord.id,
+        lastMessageAt: messageRecord.createdAt,
+        lastMessageBody: messageRecord.body,
+        otherUserId: conv.kind === 'direct' ? socket.userId : null,
+        unreadDelta: 1,
+      });
+    }
   }
 
   // Store idempotency key with TTL 5 min
@@ -611,7 +669,39 @@ export async function handleMessageRead(
   }
 
   const conv = await fastify.repos.conversations.getById(conversationId);
-  if (!conv || !conv.memberIds.includes(socket.userId)) {
+  if (!conv) {
+    socket.send(
+      JSON.stringify({
+        type: 'error',
+        payload: { code: 'not_a_member', message: 'User is not a member of this conversation' },
+        ...(ackId !== undefined ? { ackId } : {}),
+      })
+    );
+    return;
+  }
+
+  if (conv.kind === 'channel') {
+    try {
+      await checkChannelAccess(
+        fastify.redis,
+        fastify.config.SPACES_URL,
+        fastify.config.INTERNAL_TOKEN,
+        conv,
+        socket.userId,
+        ChannelChecks.view,
+        fastify.log
+      );
+    } catch (err: any) {
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          payload: { code: err?.code || 'missing_permission', message: err?.message || 'Cannot access channel' },
+          ...(ackId !== undefined ? { ackId } : {}),
+        })
+      );
+      return;
+    }
+  } else if (!conv.memberIds.includes(socket.userId)) {
     socket.send(
       JSON.stringify({
         type: 'error',
@@ -665,7 +755,9 @@ export async function handleMessageRead(
     );
   }
 
-  await fastify.repos.userConversations.clearUnread(socket.userId, conversationId);
+  if (conv.kind !== 'channel') {
+    await fastify.repos.userConversations.clearUnread(socket.userId, conversationId);
+  }
 
   // Ack sender
   socket.send(

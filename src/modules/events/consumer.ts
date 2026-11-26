@@ -4,6 +4,7 @@ import { Redis } from 'ioredis';
 import { parseEvent } from '@nebron/contracts';
 import type { SubscriptionManager } from '../../ws/subscriptions.js';
 import type { Repositories } from '../../plugins/repos.js';
+import { invalidateSpacePermissionCache } from '../../lib/space-permissions.js';
 
 export interface RedisStreamConsumerOptions {
   redisUrl: string;
@@ -561,6 +562,40 @@ export class RedisStreamEventConsumer {
                 })
               );
             }
+          }
+          break;
+        }
+
+        case 'spaces.space.deleted':
+        case 'spaces.role.changed': {
+          if (this.redis) {
+            await invalidateSpacePermissionCache(this.redis, event.payload.spaceId);
+          }
+          break;
+        }
+
+        case 'spaces.member.added':
+        case 'spaces.member.removed':
+        case 'spaces.member.roles.changed': {
+          if (this.redis) {
+            await invalidateSpacePermissionCache(
+              this.redis,
+              event.payload.spaceId,
+              undefined,
+              event.payload.userId
+            );
+          }
+          break;
+        }
+
+        case 'spaces.channel.permissions.changed':
+        case 'spaces.channel.deleted': {
+          if (this.redis) {
+            await invalidateSpacePermissionCache(
+              this.redis,
+              event.payload.spaceId,
+              event.payload.channelId
+            );
           }
           break;
         }

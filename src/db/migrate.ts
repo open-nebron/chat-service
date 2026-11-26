@@ -36,6 +36,8 @@ export async function runMigrations(
         member_count  int,
         member_ids    set<uuid>,
         request_state text,
+        space_id      text,
+        channel_id    text,
         PRIMARY KEY (id)
       )
     `);
@@ -52,6 +54,16 @@ export async function runMigrations(
     }
     try {
       await client.execute(`ALTER TABLE "${keyspace}".conversations ADD request_state text`);
+    } catch {
+      // Ignore if column already exists
+    }
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".conversations ADD space_id text`);
+    } catch {
+      // Ignore if column already exists
+    }
+    try {
+      await client.execute(`ALTER TABLE "${keyspace}".conversations ADD channel_id text`);
     } catch {
       // Ignore if column already exists
     }

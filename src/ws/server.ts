@@ -165,6 +165,29 @@ const plugin: FastifyPluginAsync = async (fastify) => {
             await handleTyping(fastify, socket, parsed);
             break;
 
+          case 'channel.subscribe': {
+            const channelConvId = parsed?.payload?.conversationId;
+            if (typeof channelConvId === 'string' && channelConvId) {
+              const conv = await fastify.repos.conversations.getById(channelConvId);
+              if (conv && conv.kind === 'channel' && conv.spaceId && conv.channelId) {
+                const { ChannelChecks, getSpaceChannelPermissions } = await import('../lib/space-permissions.js');
+                const { isMember, permissions } = await getSpaceChannelPermissions(
+                  fastify.redis,
+                  fastify.config.SPACES_URL,
+                  fastify.config.INTERNAL_TOKEN,
+                  conv.spaceId,
+                  conv.channelId,
+                  socket.userId,
+                  fastify.log
+                );
+                if (isMember && ChannelChecks.view(permissions)) {
+                  await subscriptionManager.refreshConversationSubscriptions(socket, channelConvId);
+                }
+              }
+            }
+            break;
+          }
+
           default:
             break;
         }

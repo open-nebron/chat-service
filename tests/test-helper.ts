@@ -124,6 +124,7 @@ export async function createRealTestApp(
     EVENTS_STREAM: `test.events.${keyspaceContext.keyspace}`,
     EVENTS_GROUP: `test-chat-service-${keyspaceContext.keyspace}`,
     CORE_URL: 'http://127.0.0.1:4002',
+    SPACES_URL: 'http://127.0.0.1:4005',
     INTERNAL_TOKEN: 'test-internal-token',
     WS_HEARTBEAT_INTERVAL_SECONDS: 30,
     WS_MAX_CONNECTIONS_PER_USER: 5,

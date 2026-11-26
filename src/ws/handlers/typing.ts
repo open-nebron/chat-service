@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { ExtendedWebSocket } from '../subscriptions.js';
+import { ChannelChecks, getSpaceChannelPermissions } from '../../lib/space-permissions.js';
 
 export interface TypingMessage {
   type: 'typing.start' | 'typing.stop';
@@ -35,14 +36,34 @@ export async function handleTyping(
 
   // Assert membership
   const conv = await fastify.repos.conversations.getById(conversationId);
-  if (!conv || !conv.memberIds.includes(socket.userId)) {
+  if (!conv) {
     return;
   }
 
-  // Check peer block status
-  const peerId = conv.memberIds.find((m) => m !== socket.userId) || socket.userId;
-  if (socket.blockedPeers.get(peerId)?.blocked === true) {
-    return;
+  if (conv.kind === 'channel') {
+    if (!conv.spaceId || !conv.channelId) return;
+    const { isMember, permissions } = await getSpaceChannelPermissions(
+      fastify.redis,
+      fastify.config.SPACES_URL,
+      fastify.config.INTERNAL_TOKEN,
+      conv.spaceId,
+      conv.channelId,
+      socket.userId,
+      fastify.log
+    );
+    if (!isMember || !ChannelChecks.send(permissions)) {
+      return;
+    }
+  } else {
+    if (!conv.memberIds.includes(socket.userId)) {
+      return;
+    }
+
+    // Check peer block status
+    const peerId = conv.memberIds.find((m) => m !== socket.userId) || socket.userId;
+    if (socket.blockedPeers.get(peerId)?.blocked === true) {
+      return;
+    }
   }
 
   const isStarting = message.type === 'typing.start';

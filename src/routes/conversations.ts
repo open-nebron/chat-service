@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { isValidUuid, getDirectConversationId } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
 import { getMessageRequestPolicy } from '../lib/policy-check.js';
+import { getSpaceChannelPermissions } from '../lib/space-permissions.js';
 import { capture } from '../lib/analytics.js';
 
 function sanitizeGroupName(name: unknown): string {
@@ -1594,6 +1595,26 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
       const conv = await fastify.repos.conversations.getById(id);
       if (!conv) {
         return reply.status(404).send({ error: { code: 'not_found', message: 'Conversation not found' } });
+      }
+
+      if (conv.kind === 'channel') {
+        if (!conv.spaceId || !conv.channelId) {
+          return reply.status(200).send({ isMember: false, kind: 'channel' });
+        }
+        const { isMember } = await getSpaceChannelPermissions(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv.spaceId,
+          conv.channelId,
+          userId,
+          request.log
+        );
+        return reply.status(200).send({
+          isMember,
+          kind: 'channel',
+          role: isMember ? 'member' : undefined,
+        });
       }
 
       const role = await fastify.repos.conversationMembers.getRole(id, userId);

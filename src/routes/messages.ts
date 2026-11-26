@@ -4,6 +4,8 @@ import { isValidUuid } from '../lib/conversation-id.js';
 import { AppError, ForbiddenError, NotFoundError } from '../lib/errors.js';
 import { isPeerBlocked, filterGroupRecipients, checkBlockStatus } from '../lib/block-check.js';
 import { getUserPrivacy } from '../lib/privacy.js';
+import { ChannelChecks, checkChannelAccess } from '../lib/space-permissions.js';
+import { canManageMessages } from '@nebron/permissions';
 import { capture } from '../lib/analytics.js';
 
 const getMessagesParamsSchema = z
@@ -135,7 +137,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.viewAndHistory,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -144,9 +156,10 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       const hasMore = messages.length === limit;
 
       let filteredMessages = messages;
-      const otherSenderIds = Array.from(
-        new Set(messages.map((m) => m.senderId).filter((s) => s !== currentUserId))
-      );
+      const otherSenderIds =
+        conv.kind === 'channel'
+          ? []
+          : Array.from(new Set(messages.map((m) => m.senderId).filter((s) => s !== currentUserId)));
 
       if (otherSenderIds.length > 0 && fastify.config?.INTERNAL_TOKEN) {
         const blockMap = await checkBlockStatus(
@@ -247,7 +260,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.send,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -276,7 +299,21 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         if (!srcConv) {
           throw new NotFoundError('conversation_not_found', 'Source conversation not found');
         }
-        if (!srcConv.memberIds.includes(currentUserId)) {
+        if (srcConv.kind === 'channel') {
+          try {
+            await checkChannelAccess(
+              fastify.redis,
+              fastify.config.SPACES_URL,
+              fastify.config.INTERNAL_TOKEN,
+              srcConv,
+              currentUserId,
+              ChannelChecks.viewAndHistory,
+              request.log
+            );
+          } catch {
+            throw new ForbiddenError('forward_source_inaccessible', 'Cannot forward message from inaccessible conversation');
+          }
+        } else if (!srcConv.memberIds.includes(currentUserId)) {
           throw new ForbiddenError('forward_source_inaccessible', 'Cannot forward message from inaccessible conversation');
         }
         const srcMsg = await fastify.repos.messages.getById(forwardOf.conversationId, forwardOf.messageId);
@@ -409,7 +446,9 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
 
       let permittedRecipients: string[] = [];
 
-      if (conv.kind === 'group') {
+      if (conv.kind === 'channel') {
+        permittedRecipients = [];
+      } else if (conv.kind === 'group') {
         const filterRes = await filterGroupRecipients(
           fastify.redis,
           fastify.config.CORE_URL,
@@ -476,28 +515,30 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         request.log.warn({ err: (err as Error).message }, 'Failed to index message in search');
       }
 
-      // Update user_conversations for sender (unread unchanged)
-      await fastify.repos.userConversations.upsert({
-        userId: currentUserId,
-        conversationId: id,
-        lastMessageId: message.id,
-        lastMessageAt: message.createdAt,
-        lastMessageBody: message.body,
-        otherUserId: conv.kind === 'direct' ? (permittedRecipients[0] || null) : null,
-        unreadDelta: 0,
-      });
-
-      // Update user_conversations for permitted recipients (unread +1)
-      for (const recId of permittedRecipients) {
+      // Update user_conversations for sender & recipients (skip DM inbox updates for space channels)
+      if (conv.kind !== 'channel') {
         await fastify.repos.userConversations.upsert({
-          userId: recId,
+          userId: currentUserId,
           conversationId: id,
           lastMessageId: message.id,
           lastMessageAt: message.createdAt,
           lastMessageBody: message.body,
-          otherUserId: conv.kind === 'direct' ? currentUserId : null,
-          unreadDelta: 1,
+          otherUserId: conv.kind === 'direct' ? (permittedRecipients[0] || null) : null,
+          unreadDelta: 0,
         });
+
+        // Update user_conversations for permitted recipients (unread +1)
+        for (const recId of permittedRecipients) {
+          await fastify.repos.userConversations.upsert({
+            userId: recId,
+            conversationId: id,
+            lastMessageId: message.id,
+            lastMessageAt: message.createdAt,
+            lastMessageBody: message.body,
+            otherUserId: conv.kind === 'direct' ? currentUserId : null,
+            unreadDelta: 1,
+          });
+        }
       }
 
       let replyToPreview:
@@ -585,7 +626,20 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
 
       const conv = await fastify.repos.conversations.getById(id);
       const currentUserId = request.user!.userId;
-      if (!conv || !conv.memberIds.includes(currentUserId)) {
+      if (!conv) {
+        throw new NotFoundError('message_not_found', 'Message not found');
+      }
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.viewAndHistory,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new NotFoundError('message_not_found', 'Message not found');
       }
 
@@ -677,7 +731,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.view,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -701,7 +765,9 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       if (privacy.sendReadReceipts !== false) {
         await fastify.repos.receipts.upsert(id, currentUserId, messageId);
       }
-      await fastify.repos.userConversations.clearUnread(currentUserId, id);
+      if (conv.kind !== 'channel') {
+        await fastify.repos.userConversations.clearUnread(currentUserId, id);
+      }
 
       return reply.status(204).send();
     }
@@ -736,7 +802,19 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      let canDeleteAnyChannelMessage = false;
+      if (conv.kind === 'channel') {
+        const perms = await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.view,
+          request.log
+        );
+        canDeleteAnyChannelMessage = canManageMessages(perms);
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -745,14 +823,18 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
         throw new NotFoundError('message_not_found', 'Message not found');
       }
 
-      if (msg.senderId !== currentUserId) {
+      if (msg.senderId !== currentUserId && !canDeleteAnyChannelMessage) {
         throw new ForbiddenError(
           'not_message_owner',
           'You can only delete your own messages'
         );
       }
 
-      await fastify.repos.messages.softDelete(id, messageId, currentUserId);
+      if (msg.senderId === currentUserId) {
+        await fastify.repos.messages.softDelete(id, messageId, currentUserId);
+      } else {
+        await fastify.repos.messages.adminDelete(id, messageId);
+      }
       try {
         await fastify.search.deleteMessage(messageId);
       } catch (err) {
@@ -832,7 +914,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.view,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -979,7 +1071,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.view,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -1123,7 +1225,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.react,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -1224,7 +1336,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.view,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 
@@ -1318,7 +1440,17 @@ export const messagesRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const currentUserId = request.user!.userId;
-      if (!conv.memberIds.includes(currentUserId)) {
+      if (conv.kind === 'channel') {
+        await checkChannelAccess(
+          fastify.redis,
+          fastify.config.SPACES_URL,
+          fastify.config.INTERNAL_TOKEN,
+          conv,
+          currentUserId,
+          ChannelChecks.viewAndHistory,
+          request.log
+        );
+      } else if (!conv.memberIds.includes(currentUserId)) {
         throw new ForbiddenError('not_a_member', 'User is not a member of this conversation');
       }
 

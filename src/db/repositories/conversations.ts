@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import cassandra from 'cassandra-driver';
+import { v5 as uuidv5 } from 'uuid';
 import {
   getDirectConversationId,
+  NEBRON_CONVERSATION_NAMESPACE,
   toCassandraUuid,
   fromCassandraUuid,
 } from '../../lib/conversation-id.js';
@@ -12,7 +14,7 @@ export type RequestState = 'active' | 'pending' | 'rejected';
 
 export interface Conversation {
   id: string;
-  kind: string; // 'direct' | 'group'
+  kind: string; // 'direct' | 'group' | 'channel'
   createdAt: Date;
   createdBy?: string | null;
   name?: string | null;
@@ -20,6 +22,8 @@ export interface Conversation {
   memberCount?: number;
   memberIds: string[];
   requestState?: RequestState | null;
+  spaceId?: string | null;
+  channelId?: string | null;
 }
 
 export interface CreateGroupParams {
@@ -144,6 +148,52 @@ export class ConversationsRepository {
       ownerId: params.ownerId,
       memberCount,
       memberIds: allMemberIds,
+    };
+  }
+
+  async createChannelConversation(params: {
+    spaceId: string;
+    channelId: string;
+    name: string;
+  }): Promise<Conversation> {
+    const id = uuidv5(
+      `nebron:space-channel:${params.spaceId}:${params.channelId}`,
+      NEBRON_CONVERSATION_NAMESPACE
+    );
+    const existing = await this.getById(id);
+    if (existing) {
+      return existing;
+    }
+
+    const now = new Date();
+    await this.client.execute(
+      'INSERT INTO conversations (id, kind, created_at, created_by, name, owner_id, member_count, member_ids, space_id, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        cassandra.types.Uuid.fromString(id),
+        'channel',
+        now,
+        null,
+        params.name,
+        null,
+        0,
+        [],
+        params.spaceId,
+        params.channelId,
+      ],
+      { prepare: true }
+    );
+
+    return {
+      id,
+      kind: 'channel',
+      createdAt: now,
+      createdBy: null,
+      name: params.name,
+      ownerId: null,
+      memberCount: 0,
+      memberIds: [],
+      spaceId: params.spaceId,
+      channelId: params.channelId,
     };
   }
 
@@ -319,7 +369,7 @@ export class ConversationsRepository {
 
   async getById(id: string): Promise<Conversation | null> {
     const result = await this.client.execute(
-      'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state FROM conversations WHERE id = ?',
+      'SELECT id, kind, created_at, created_by, name, owner_id, member_count, member_ids, request_state, space_id, channel_id FROM conversations WHERE id = ?',
       [cassandra.types.Uuid.fromString(id)],
       { prepare: true }
     );
@@ -348,6 +398,8 @@ export class ConversationsRepository {
             : memberIds.length,
       memberIds,
       requestState: (row.request_state as RequestState) ?? (row.kind === 'direct' ? 'active' : null),
+      spaceId: row.space_id ?? null,
+      channelId: row.channel_id ?? null,
     };
   }
 }

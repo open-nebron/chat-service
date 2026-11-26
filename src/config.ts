@@ -27,6 +27,7 @@ export const configSchema = z.object({
   EVENTS_STREAM: z.string().default('nebron.events'),
   EVENTS_GROUP: z.string().default('chat-service'),
   CORE_URL: z.string().default('http://core:4002'),
+  SPACES_URL: z.string().default('http://spaces:4005'),
   INTERNAL_TOKEN: z
     .string({
       required_error: 'INTERNAL_TOKEN is required',
