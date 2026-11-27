@@ -163,4 +163,108 @@ describe('WS Presence Tracking', () => {
 
     wsA.close();
   });
+
+  it('Sends presence.snapshot on connect when peer is already online', async () => {
+    const tokenA = await createTestToken(userA);
+    const wsA = trackSocket(new WebSocket(getWsUrl(app, tokenA)));
+    await waitForMessage(wsA, (m) => m.type === 'ready');
+
+    // Now B connects after A is already online and expects snapshot containing A & B
+    const tokenB = await createTestToken(userB);
+    const wsB = trackSocket(new WebSocket(getWsUrl(app, tokenB)));
+    const snapshot = await waitForMessage(
+      wsB,
+      (m) => m.type === 'presence.snapshot' && Array.isArray(m.payload?.users)
+    );
+    const ids = snapshot.payload.users.map((u: any) => u.userId);
+    expect(ids).toContain(userA);
+    expect(ids).toContain(userB);
+
+    wsA.close();
+    wsB.close();
+  });
+
+  it('Ignores typing.start with invalid conversationId "undefined" without crashing', async () => {
+    const tokenA = await createTestToken(userA);
+    const wsA = trackSocket(new WebSocket(getWsUrl(app, tokenA)));
+    await waitForMessage(wsA, (m) => m.type === 'ready');
+
+    let receivedError = false;
+    wsA.on('message', (raw) => {
+      const parsed = JSON.parse(raw.toString());
+      if (parsed.type === 'error') {
+        receivedError = true;
+      }
+    });
+
+    wsA.send(JSON.stringify({ type: 'typing.start', payload: { conversationId: 'undefined' }, id: 't-1' }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(receivedError).toBe(false);
+    expect(wsA.readyState).toBe(1);
+
+    wsA.close();
+  });
+
+  it('Dynamic accept-request & channel.subscribe deliver real-time messages without reconnect', async () => {
+    const userC = 'dccccccc-7777-4777-8777-777777777777';
+    const userD = 'dddddddd-8888-4888-8888-888888888888';
+    const tokenC = await createTestToken(userC);
+    const tokenD = await createTestToken(userD);
+
+    // Connect both users BEFORE creating conversation
+    const wsC = trackSocket(new WebSocket(getWsUrl(app, tokenC)));
+    const wsD = trackSocket(new WebSocket(getWsUrl(app, tokenD)));
+    await waitForMessage(wsC, (m) => m.type === 'ready');
+    await waitForMessage(wsD, (m) => m.type === 'ready');
+
+    // Create direct conversation via REST API (mockCore returns 404 -> policy defaults to 'known' -> pending)
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/conversations',
+      headers: { authorization: `Bearer ${tokenC}` },
+      payload: { peerUserId: userD },
+    });
+    expect(createRes.statusCode).toBe(200);
+    const newConvId = createRes.json().data.id;
+
+    // C subscribes via channel.subscribe and sends initial request message
+    wsC.send(JSON.stringify({ type: 'channel.subscribe', payload: { conversationId: newConvId } }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    wsC.send(
+      JSON.stringify({
+        type: 'message.send',
+        payload: { conversationId: newConvId, body: 'hi there', clientId: 'c-live-0' },
+        id: 'm-0',
+      })
+    );
+    await waitForMessage(wsC, (m) => m.type === 'message.sent' && m.ackId === 'm-0');
+
+    // D accepts request -> backend publishes conversation.request_accepted to ws:user:userD & ws:user:userC
+    const acceptRes = await app.inject({
+      method: 'POST',
+      url: `/conversations/${newConvId}/accept-request`,
+      headers: { authorization: `Bearer ${tokenD}` },
+    });
+    expect(acceptRes.statusCode).toBe(200);
+    await new Promise((r) => setTimeout(r, 150));
+
+    // C sends a follow-up message via WS -> D receives message.new without refreshing/reconnecting
+    wsC.send(
+      JSON.stringify({
+        type: 'message.send',
+        payload: { conversationId: newConvId, body: 'live without refresh', clientId: 'c-live-1' },
+        id: 'm-1',
+      })
+    );
+
+    const delivered = await waitForMessage(
+      wsD,
+      (m) => m.type === 'message.new' && m.payload?.message?.body === 'live without refresh'
+    );
+    expect(delivered.payload.message.conversationId).toBe(newConvId);
+
+    wsC.close();
+    wsD.close();
+  });
 });

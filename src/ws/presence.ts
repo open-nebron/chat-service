@@ -78,4 +78,48 @@ export class PresenceManager {
       }
     }
   }
+
+  public async getOnlineUsersSnapshot(
+    userIds: string[]
+  ): Promise<Array<{ userId: string; online: boolean }>> {
+    const uniqueIds = Array.from(new Set(userIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return [];
+
+    const pipeline = this.redis.pipeline();
+    for (const uid of uniqueIds) {
+      pipeline.hget(`presence:${uid}`, 'sockets');
+    }
+    const results = await pipeline.exec();
+    if (!results) return [];
+
+    const candidateOnlineIds: string[] = [];
+    for (let i = 0; i < uniqueIds.length; i++) {
+      const uid = uniqueIds[i];
+      const [err, val] = results[i] || [];
+      if (uid && !err && Number(val) > 0) {
+        candidateOnlineIds.push(uid);
+      }
+    }
+
+    if (candidateOnlineIds.length === 0) return [];
+
+    if (!this.coreUrl || !this.internalToken) {
+      return candidateOnlineIds.map((userId) => ({ userId, online: true }));
+    }
+
+    const privacyChecks = await Promise.all(
+      candidateOnlineIds.map(async (uid) => {
+        const privacy = await getUserPrivacy(this.redis, this.coreUrl!, this.internalToken!, uid);
+        return { uid, show: privacy.showOnlineStatus !== 'nobody' };
+      })
+    );
+
+    const visibleUsers: Array<{ userId: string; online: boolean }> = [];
+    for (const item of privacyChecks) {
+      if (item.show) {
+        visibleUsers.push({ userId: item.uid, online: true });
+      }
+    }
+    return visibleUsers;
+  }
 }

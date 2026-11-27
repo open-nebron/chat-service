@@ -225,7 +225,8 @@ export class SubscriptionManager {
         if (convId) {
           if (
             cleanPayload.type === 'conversation.created' ||
-            cleanPayload.type === 'conversation.member_added'
+            cleanPayload.type === 'conversation.member_added' ||
+            cleanPayload.type === 'conversation.request_accepted'
           ) {
             this.subscribe(socket, `ws:conv:${convId}`).catch(() => {});
           } else if (cleanPayload.type === 'conversation.member_removed') {

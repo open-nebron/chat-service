@@ -178,6 +178,24 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
           isPending: true,
         });
 
+        try {
+          await fastify.redis.publish(
+            `ws:user:${currentUserId}`,
+            JSON.stringify({
+              type: 'conversation.created',
+              payload: {
+                conversationId: conv.id,
+                kind: 'direct',
+                peerUserId,
+                createdAt: conv.createdAt.toISOString(),
+              },
+            })
+          );
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          request.log.warn({ err: errMsg }, 'Failed publishing pending conversation.created to ws:user');
+        }
+
         return reply.status(200).send({
           data: {
             id: conv.id,
@@ -224,13 +242,34 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
         isPending: false,
       });
 
+      const createdAtIso = conv.createdAt.toISOString();
+      for (const participantId of [currentUserId, peerUserId]) {
+        try {
+          await fastify.redis.publish(
+            `ws:user:${participantId}`,
+            JSON.stringify({
+              type: 'conversation.created',
+              payload: {
+                conversationId: conv.id,
+                kind: 'direct',
+                peerUserId: participantId === currentUserId ? peerUserId : currentUserId,
+                createdAt: createdAtIso,
+              },
+            })
+          );
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          request.log.warn({ err: errMsg, participantId }, 'Failed publishing direct conversation.created to ws:user');
+        }
+      }
+
       capture(currentUserId, 'conversation_created', { conversationId: conv.id, type: 'direct' });
 
       return reply.status(200).send({
         data: {
           id: conv.id,
           kind: 'direct',
-          createdAt: conv.createdAt.toISOString(),
+          createdAt: createdAtIso,
           peerUserId,
           request_state: 'active',
           requestState: 'active',
@@ -1078,6 +1117,10 @@ export const conversationsRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         await fastify.redis.publish(
           `ws:conv:${id}`,
+          JSON.stringify({ type: 'conversation.request_accepted', payload: acceptPayload })
+        );
+        await fastify.redis.publish(
+          `ws:user:${currentUserId}`,
           JSON.stringify({ type: 'conversation.request_accepted', payload: acceptPayload })
         );
         if (conv.createdBy) {

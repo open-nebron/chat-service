@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { ExtendedWebSocket } from '../subscriptions.js';
+import { isValidUuid } from '../../lib/conversation-id.js';
 import { ChannelChecks, getSpaceChannelPermissions } from '../../lib/space-permissions.js';
 
 export interface TypingMessage {
@@ -16,7 +17,7 @@ export async function handleTyping(
   message: TypingMessage
 ): Promise<void> {
   const { conversationId } = message.payload || {};
-  if (!conversationId) {
+  if (!conversationId || !isValidUuid(conversationId)) {
     return;
   }
 

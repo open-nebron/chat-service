@@ -10,6 +10,7 @@ import { checkUserBanned } from '../lib/ban-check.js';
 import { handlePing } from './handlers/ping.js';
 import { handleTyping } from './handlers/typing.js';
 import { handleMessageSend, handleMessageRead } from './handlers/message.js';
+import { isValidUuid } from '../lib/conversation-id.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -121,6 +122,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
 
     let convIds: string[] = [];
     let presenceConvIds: string[] = [];
+    const allPeerIds = new Set<string>();
 
     // Frame handling
     socket.on('message', async (data: any) => {
@@ -167,7 +169,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
 
           case 'channel.subscribe': {
             const channelConvId = parsed?.payload?.conversationId;
-            if (typeof channelConvId === 'string' && channelConvId) {
+            if (typeof channelConvId === 'string' && isValidUuid(channelConvId)) {
               const conv = await fastify.repos.conversations.getById(channelConvId);
               if (conv && conv.kind === 'channel' && conv.spaceId && conv.channelId) {
                 const { ChannelChecks, getSpaceChannelPermissions } = await import('../lib/space-permissions.js');
@@ -182,6 +184,23 @@ const plugin: FastifyPluginAsync = async (fastify) => {
                 );
                 if (isMember && ChannelChecks.view(permissions)) {
                   await subscriptionManager.refreshConversationSubscriptions(socket, channelConvId);
+                }
+              } else if (conv && conv.memberIds.includes(socket.userId)) {
+                await subscriptionManager.refreshConversationSubscriptions(socket, channelConvId);
+                if ((conv.memberCount ?? conv.memberIds.length) <= 20 && !presenceConvIds.includes(conv.id)) {
+                  presenceConvIds.push(conv.id);
+                }
+                const visibleCandidates = conv.memberIds.filter(
+                  (id) => id === socket.userId || !socket.blockedPeers.get(id)?.blocked
+                );
+                const onlineUsers = await presenceManager.getOnlineUsersSnapshot(visibleCandidates);
+                if (onlineUsers.length > 0 && socket.readyState === 1) {
+                  socket.send(
+                    JSON.stringify({
+                      type: 'presence.snapshot',
+                      payload: { users: onlineUsers },
+                    })
+                  );
                 }
               }
             }
@@ -247,7 +266,6 @@ const plugin: FastifyPluginAsync = async (fastify) => {
         .map((c) => c!.id);
 
       // Collect all peers across all direct and group conversations
-      const allPeerIds = new Set<string>();
       for (const c of convObjects) {
         if (!c) continue;
         for (const m of c.memberIds) {
@@ -313,6 +331,24 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       },
     };
     socket.send(JSON.stringify(readyMessage));
+
+    try {
+      const snapshotCandidates = [
+        userId,
+        ...Array.from(allPeerIds).filter((peerId) => !socket.blockedPeers.get(peerId)?.blocked),
+      ];
+      const onlineUsers = await presenceManager.getOnlineUsersSnapshot(snapshotCandidates);
+      if (onlineUsers.length > 0 && socket.readyState === 1) {
+        socket.send(
+          JSON.stringify({
+            type: 'presence.snapshot',
+            payload: { users: onlineUsers },
+          })
+        );
+      }
+    } catch (err: any) {
+      fastify.log.warn({ err: err?.message }, 'Failed sending presence snapshot on connect');
+    }
   });
 };
 
